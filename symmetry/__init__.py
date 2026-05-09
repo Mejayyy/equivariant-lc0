@@ -6,7 +6,14 @@ from .group import (
     compose,
     inverse,
 )
-from .actions import group_action_input, group_action_output
+from .actions import (
+    build_policy_permutation,
+    group_action_input,
+    group_action_mlh,
+    group_action_output,
+    group_action_policy,
+    group_action_value,
+)
 
 __all__ = [
     "GChess",
@@ -17,4 +24,8 @@ __all__ = [
     "inverse",
     "group_action_input",
     "group_action_output",
+    "group_action_policy",
+    "group_action_value",
+    "group_action_mlh",
+    "build_policy_permutation",
 ]

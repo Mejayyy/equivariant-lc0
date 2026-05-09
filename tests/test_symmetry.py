@@ -17,8 +17,19 @@ from symmetry.group import (
 )
 from symmetry.actions import (
     SIGMA_C_CHANNEL_PERM,
+    build_policy_permutation,
     group_action_input,
+    group_action_mlh,
     group_action_output,
+    group_action_policy,
+    group_action_value,
+)
+from models.policy_map import (
+    MOVE_TO_POLICY_INDEX,
+    POLICY_INDEX_SIZE,
+    POLICY_INDEX_TO_MOVE,
+    POLICY_INDEX_TO_UCI,
+    UCI_TO_POLICY_INDEX,
 )
 
 
@@ -265,3 +276,201 @@ def test_output_action_is_homomorphism():
             assert torch.equal(sequential, composed), (
                 f"{g1.name}({g2.name}(fx)) != ({g1.name} o {g2.name})(fx)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: policy map structure
+# ---------------------------------------------------------------------------
+
+
+def test_policy_index_size_is_1858():
+    assert POLICY_INDEX_SIZE == 1858
+    assert len(POLICY_INDEX_TO_MOVE) == 1858
+    assert len(POLICY_INDEX_TO_UCI) == 1858
+
+
+def test_policy_uci_strings_are_unique():
+    assert len(set(POLICY_INDEX_TO_UCI)) == POLICY_INDEX_SIZE
+
+
+def test_policy_move_tuples_are_unique():
+    assert len(set(POLICY_INDEX_TO_MOVE)) == POLICY_INDEX_SIZE
+
+
+def test_policy_index_round_trip_uci():
+    for i, uci in enumerate(POLICY_INDEX_TO_UCI):
+        assert UCI_TO_POLICY_INDEX[uci] == i
+
+
+def test_policy_index_round_trip_move():
+    for i, m in enumerate(POLICY_INDEX_TO_MOVE):
+        assert MOVE_TO_POLICY_INDEX[m] == i
+
+
+def test_known_policy_entries_present():
+    """Spot-check a handful of well-known moves."""
+    for uci in ["a1a8", "h1h8", "e2e4", "e7e5", "g1f3", "b1c3", "e7e8n", "e7e8b", "e7e8r"]:
+        assert uci in UCI_TO_POLICY_INDEX, f"missing: {uci}"
+
+
+def test_promotion_count_is_66():
+    promo_moves = [m for m in POLICY_INDEX_TO_MOVE if m[2]]
+    assert len(promo_moves) == 66
+
+
+def test_queen_and_knight_counts():
+    nonpromo_moves = [m for m in POLICY_INDEX_TO_MOVE if not m[2]]
+    assert len(nonpromo_moves) == 1456 + 336
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: build_policy_permutation
+# ---------------------------------------------------------------------------
+
+
+def test_policy_permutation_identity_is_arange():
+    perm = build_policy_permutation(GChess.E)
+    assert torch.equal(perm, torch.arange(POLICY_INDEX_SIZE, dtype=torch.long))
+
+
+@pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
+def test_policy_permutation_is_self_inverse(g):
+    """DOD: perm[perm] == identity for every non-identity g."""
+    perm = build_policy_permutation(g)
+    composed = perm[perm]
+    expected = torch.arange(POLICY_INDEX_SIZE, dtype=torch.long)
+    assert torch.equal(composed, expected), f"perm[perm] != identity for {g.name}"
+
+
+@pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
+def test_policy_permutation_is_a_permutation(g):
+    """The 1858 indices must each appear exactly once."""
+    perm = build_policy_permutation(g)
+    sorted_perm, _ = torch.sort(perm)
+    assert torch.equal(sorted_perm, torch.arange(POLICY_INDEX_SIZE, dtype=torch.long))
+
+
+def test_sigma_h_e2e4_maps_to_d2d4():
+    """DOD example: under sigma_h (file flip), e2-e4 -> d2-d4."""
+    perm = build_policy_permutation(GChess.SIGMA_H)
+    src = UCI_TO_POLICY_INDEX["e2e4"]
+    dst = UCI_TO_POLICY_INDEX["d2d4"]
+    assert perm[src].item() == dst
+
+
+def test_sigma_h_corner_swap():
+    """File flip swaps the a- and h-files."""
+    perm = build_policy_permutation(GChess.SIGMA_H)
+    assert perm[UCI_TO_POLICY_INDEX["a1a8"]].item() == UCI_TO_POLICY_INDEX["h1h8"]
+    assert perm[UCI_TO_POLICY_INDEX["h1h8"]].item() == UCI_TO_POLICY_INDEX["a1a8"]
+
+
+def test_sigma_h_knight_move():
+    """Under sigma_h, b1-c3 -> g1-f3."""
+    perm = build_policy_permutation(GChess.SIGMA_H)
+    src = UCI_TO_POLICY_INDEX["b1c3"]
+    dst = UCI_TO_POLICY_INDEX["g1f3"]
+    assert perm[src].item() == dst
+
+
+def test_sigma_c_e2e4_maps_to_e7e5():
+    """Under sigma_c (rank flip on non-promotions), e2-e4 -> e7-e5."""
+    perm = build_policy_permutation(GChess.SIGMA_C)
+    src = UCI_TO_POLICY_INDEX["e2e4"]
+    dst = UCI_TO_POLICY_INDEX["e7e5"]
+    assert perm[src].item() == dst
+
+
+def test_sigma_hc_e2e4_maps_to_d7d5():
+    """Under sigma_hc (file + rank flips), e2-e4 -> d7-d5."""
+    perm = build_policy_permutation(GChess.SIGMA_HC)
+    src = UCI_TO_POLICY_INDEX["e2e4"]
+    dst = UCI_TO_POLICY_INDEX["d7d5"]
+    assert perm[src].item() == dst
+
+
+def test_sigma_h_promotion_file_flips():
+    """Under sigma_h, a7-a8n -> h7-h8n; a7-b8r -> h7-g8r."""
+    perm = build_policy_permutation(GChess.SIGMA_H)
+    assert perm[UCI_TO_POLICY_INDEX["a7a8n"]].item() == UCI_TO_POLICY_INDEX["h7h8n"]
+    assert perm[UCI_TO_POLICY_INDEX["a7b8r"]].item() == UCI_TO_POLICY_INDEX["h7g8r"]
+
+
+def test_sigma_c_promotion_is_identity():
+    """sigma_c is treated as identity on under-promotion slots — see actions.py docstring."""
+    perm = build_policy_permutation(GChess.SIGMA_C)
+    for uci in ["a7a8n", "h7h8r", "e7e8b", "a7b8n", "h7g8r"]:
+        idx = UCI_TO_POLICY_INDEX[uci]
+        assert perm[idx].item() == idx, f"sigma_c should be identity on {uci}"
+
+
+def test_sigma_hc_promotion_is_file_flip_only():
+    """sigma_hc on under-promotions = sigma_h alone (since sigma_c is identity on promos)."""
+    perm = build_policy_permutation(GChess.SIGMA_HC)
+    assert perm[UCI_TO_POLICY_INDEX["a7a8n"]].item() == UCI_TO_POLICY_INDEX["h7h8n"]
+    assert perm[UCI_TO_POLICY_INDEX["e7e8b"]].item() == UCI_TO_POLICY_INDEX["d7d8b"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: group_action_policy / _value / _mlh
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("g", ELEMENTS)
+def test_group_action_policy_self_inverse(g):
+    p = torch.randn(2, 1858)
+    twice = group_action_policy(g, group_action_policy(g, p))
+    assert torch.equal(twice, p)
+
+
+def test_group_action_policy_matches_permutation():
+    """group_action_policy must use the build_policy_permutation indices."""
+    p = torch.arange(1858, dtype=torch.float32).unsqueeze(0)
+    for g in [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC]:
+        perm = build_policy_permutation(g)
+        out = group_action_policy(g, p)
+        # out[0, j] == p[0, perm[j]] == perm[j]
+        assert torch.equal(out[0], perm.float())
+
+
+def test_group_action_policy_concrete_e2e4():
+    """If logit at e2e4 = 7.0 and we apply sigma_h, that 7.0 ends up at d2d4."""
+    p = torch.zeros(1, 1858)
+    p[0, UCI_TO_POLICY_INDEX["e2e4"]] = 7.0
+    out = group_action_policy(GChess.SIGMA_H, p)
+    assert out[0, UCI_TO_POLICY_INDEX["d2d4"]].item() == 7.0
+    # And the original slot should be 0 (since d2d4 was 0 originally and
+    # under sigma_h the d2d4 logit comes from the e2e4 slot... let's just
+    # check the e2e4 slot got overwritten by whatever was at sigma_h(e2e4) = d2d4).
+    assert out[0, UCI_TO_POLICY_INDEX["e2e4"]].item() == 0.0
+
+
+@pytest.mark.parametrize("g", ELEMENTS)
+def test_group_action_value_self_inverse(g):
+    v = torch.softmax(torch.randn(2, 3), dim=-1)
+    twice = group_action_value(g, group_action_value(g, v))
+    assert torch.allclose(twice, v)
+
+
+def test_group_action_value_sigma_h_is_identity():
+    v = torch.tensor([[0.6, 0.3, 0.1]])
+    assert torch.equal(group_action_value(GChess.SIGMA_H, v), v)
+
+
+def test_group_action_value_sigma_c_swaps_W_and_L():
+    v = torch.tensor([[0.6, 0.3, 0.1]])  # W=0.6, D=0.3, L=0.1
+    out = group_action_value(GChess.SIGMA_C, v)
+    assert torch.equal(out, torch.tensor([[0.1, 0.3, 0.6]]))
+
+
+def test_group_action_value_sigma_hc_swaps_W_and_L():
+    v = torch.tensor([[0.6, 0.3, 0.1]])
+    out = group_action_value(GChess.SIGMA_HC, v)
+    assert torch.equal(out, torch.tensor([[0.1, 0.3, 0.6]]))
+
+
+@pytest.mark.parametrize("g", ELEMENTS)
+def test_group_action_mlh_invariant(g):
+    m = torch.tensor([[5.0], [12.0]])
+    out = group_action_mlh(g, m)
+    assert torch.equal(out, m)
