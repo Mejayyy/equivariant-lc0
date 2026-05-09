@@ -1,0 +1,8 @@
+torch>=2.0.0
+torchvision>=0.15.0
+python-chess>=1.999
+numpy>=1.24
+pytest>=7.0
+torchinfo>=1.8
+matplotlib>=3.7
+tqdm>=4.65

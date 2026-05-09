@@ -1,0 +1,7 @@
+raw_data/
+runs/
+.venv/
+__pycache__/
+*.pt
+.pytest_cache/
+.claude/settings.local.json
