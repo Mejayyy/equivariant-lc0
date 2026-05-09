@@ -329,6 +329,65 @@ def test_queen_and_knight_counts():
 
 
 # ---------------------------------------------------------------------------
+# 80-channel gather (lc0 AZ-policy-head layout)
+# ---------------------------------------------------------------------------
+
+
+def test_policy_gather_indices_shape_and_uniqueness():
+    """build_policy_gather_indices returns 1858 unique int64 indices in
+    the (80, 8, 8) flat range, all landing in the 73 used planes."""
+    from models.policy_map import build_policy_gather_indices, POLICY_NUM_CHANNELS
+
+    idx = build_policy_gather_indices()
+    assert idx.shape == (POLICY_INDEX_SIZE,)
+    assert idx.dtype == torch.int64
+    assert idx.min().item() >= 0
+    assert idx.max().item() < POLICY_NUM_CHANNELS * 8 * 8  # < 5120
+    # All 1858 entries are distinct.
+    assert idx.unique().shape[0] == POLICY_INDEX_SIZE
+    # No move gathers from the 7 unused padding planes (73..79).
+    assert idx.max().item() < 73 * 64
+
+
+def test_policy_gather_known_positions():
+    """Hand-checked flat-positions for a few canonical moves.
+
+    Channel layout:
+      planes  0..55: queen-style. Plane = direction*7 + (steps-1).
+                     Direction order: N, NE, E, SE, S, SW, W, NW.
+      planes 56..63: knight. Plane = 56 + direction.
+      planes 64..72: under-promotion. Plane = 64 + direction*3 + piece_idx.
+                     Direction order: NW, N, NE.  Piece order: r, b, q.
+    Within a plane, flat-offset = rank * 8 + file.
+    """
+    from models.policy_map import build_policy_gather_indices
+
+    idx = build_policy_gather_indices()
+
+    # e2e4: queen N (dir 0), steps 2 -> plane 1; rank 1, file 4 -> 1*64 + 12 = 76.
+    assert idx[UCI_TO_POLICY_INDEX["e2e4"]].item() == 76
+
+    # g1f3: knight from g1 with vector (-1, 2) which is the NW knight slot
+    # (8th direction = index 7) -> plane 56+7 = 63; rank 0, file 6 -> 63*64 + 6 = 4038.
+    assert idx[UCI_TO_POLICY_INDEX["g1f3"]].item() == 4038
+
+    # e7e8q: under-promo N (dir 1), piece q (idx 2) -> plane 64 + 1*3 + 2 = 69;
+    # rank 6, file 4 -> 69*64 + 52 = 4468.
+    assert idx[UCI_TO_POLICY_INDEX["e7e8q"]].item() == 4468
+
+
+def test_policy_gather_inverse_round_trip():
+    """build_flat_to_policy_index is the inverse of build_policy_gather_indices."""
+    from models.policy_map import build_flat_to_policy_index, build_policy_gather_indices
+
+    idx = build_policy_gather_indices()
+    inv = build_flat_to_policy_index()
+    assert len(inv) == POLICY_INDEX_SIZE
+    for policy_i, flat in enumerate(idx.tolist()):
+        assert inv[flat] == policy_i
+
+
+# ---------------------------------------------------------------------------
 # Phase 3: build_policy_permutation
 # ---------------------------------------------------------------------------
 
