@@ -15,8 +15,18 @@ V6 record layout (8356 bytes, little-endian):
                   castling_them_ooo / castling_them_oo (4x uint8)
       8276     1  side_to_move_or_enpassant (uint8)
       8277     1  rule50_count (uint8)
-      8278     1  invariance_info (uint8) — bit 7 = post-canonicalization
-                  side-to-move (relevant for input_format >= 3).
+      8278     1  invariance_info (uint8) — bitfield, semantics per
+                  lczero-training/tf/chunkparser.py:
+                    bit 0: flip transform     (input_format >= 3)
+                    bit 1: mirror transform   (input_format >= 3)
+                    bit 2: transpose transform (input_format >= 3)
+                    bit 3: best_q is for proven best move
+                    bit 4: max game length exceeded
+                    bit 5: game adjudicated
+                    bit 6: marked for deletion
+                    bit 7: side-to-move        (input_format >= 3)
+                  For input_format == 1, bits 0/1/2/7 are unused; side-to-
+                  move comes from `side_to_move_or_enpassant` directly.
       8279     1  dep_result (int8) — deprecated.
       8280    60  15 floats: root_q, best_q, root_d, best_d, root_m, best_m,
                   plies_left, result_q, result_d, played_q, played_d,

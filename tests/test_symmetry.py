@@ -308,9 +308,14 @@ def test_policy_index_round_trip_move():
 
 
 def test_known_policy_entries_present():
-    """Spot-check a handful of well-known moves."""
-    for uci in ["a1a8", "h1h8", "e2e4", "e7e5", "g1f3", "b1c3", "e7e8n", "e7e8b", "e7e8r"]:
+    """Spot-check a handful of well-known moves. LCZero's canonical 1858
+    list encodes promotions for q/r/b ONLY (knight-promotion shares its
+    slot with the corresponding knight move)."""
+    for uci in ["a1a8", "h1h8", "e2e4", "e7e5", "g1f3", "b1c3",
+                "e7e8q", "e7e8r", "e7e8b"]:
         assert uci in UCI_TO_POLICY_INDEX, f"missing: {uci}"
+    for uci in ["e7e8n"]:  # knight promotion is NOT a separate slot
+        assert uci not in UCI_TO_POLICY_INDEX
 
 
 def test_promotion_count_is_66():
@@ -390,24 +395,24 @@ def test_sigma_hc_e2e4_maps_to_d7d5():
 
 
 def test_sigma_h_promotion_file_flips():
-    """Under sigma_h, a7-a8n -> h7-h8n; a7-b8r -> h7-g8r."""
+    """Under sigma_h, a7-a8q -> h7-h8q; a7-b8r -> h7-g8r."""
     perm = build_policy_permutation(GChess.SIGMA_H)
-    assert perm[UCI_TO_POLICY_INDEX["a7a8n"]].item() == UCI_TO_POLICY_INDEX["h7h8n"]
+    assert perm[UCI_TO_POLICY_INDEX["a7a8q"]].item() == UCI_TO_POLICY_INDEX["h7h8q"]
     assert perm[UCI_TO_POLICY_INDEX["a7b8r"]].item() == UCI_TO_POLICY_INDEX["h7g8r"]
 
 
 def test_sigma_c_promotion_is_identity():
-    """sigma_c is treated as identity on under-promotion slots — see actions.py docstring."""
+    """sigma_c is treated as identity on promotion slots — see actions.py docstring."""
     perm = build_policy_permutation(GChess.SIGMA_C)
-    for uci in ["a7a8n", "h7h8r", "e7e8b", "a7b8n", "h7g8r"]:
+    for uci in ["a7a8q", "h7h8r", "e7e8b", "a7b8q", "h7g8r"]:
         idx = UCI_TO_POLICY_INDEX[uci]
         assert perm[idx].item() == idx, f"sigma_c should be identity on {uci}"
 
 
 def test_sigma_hc_promotion_is_file_flip_only():
-    """sigma_hc on under-promotions = sigma_h alone (since sigma_c is identity on promos)."""
+    """sigma_hc on promotions = sigma_h alone (since sigma_c is identity on promos)."""
     perm = build_policy_permutation(GChess.SIGMA_HC)
-    assert perm[UCI_TO_POLICY_INDEX["a7a8n"]].item() == UCI_TO_POLICY_INDEX["h7h8n"]
+    assert perm[UCI_TO_POLICY_INDEX["a7a8q"]].item() == UCI_TO_POLICY_INDEX["h7h8q"]
     assert perm[UCI_TO_POLICY_INDEX["e7e8b"]].item() == UCI_TO_POLICY_INDEX["d7d8b"]
 
 
