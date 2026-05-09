@@ -12,7 +12,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
+from data.dataset import LCZeroV6Dataset
 from data.extract_planes import _decode_13_planes, get_side_to_move, v6_to_34_planes
 from data.extract_targets import v6_to_targets
 from data.v6_parser import V6_RECORD_SIZE, iter_v6_records_from_file, parse_v6_record
@@ -267,3 +269,53 @@ def test_bitboard_repetition_plane():
     assert (p[12] == 1).all()
     p2 = _decode_13_planes(np.array([0] * 13, dtype=np.uint64))
     assert (p2[12] == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: LCZeroV6Dataset
+# ---------------------------------------------------------------------------
+
+
+@skip_no_data
+def test_dataset_yields_correct_shapes():
+    """Phase 5 DOD: Dataset yields correct shapes from a single chunk file."""
+    ds = LCZeroV6Dataset(folders=[REAL_DATA_DIR], shuffle_buffer=0)
+    it = iter(ds)
+    samples = [next(it) for _ in range(5)]
+    for planes, targets in samples:
+        assert isinstance(planes, torch.Tensor)
+        assert planes.shape == (34, 8, 8)
+        assert planes.dtype == torch.float32
+
+        assert isinstance(targets, dict)
+        assert set(targets.keys()) == {"policy", "value", "mlh"}
+        assert targets["policy"].shape == (1858,)
+        assert targets["policy"].dtype == torch.float32
+        assert targets["value"].shape == (3,)
+        assert targets["value"].dtype == torch.float32
+        # MLH is a 0-dim scalar tensor.
+        assert targets["mlh"].shape == ()
+        assert targets["mlh"].dtype == torch.float32
+
+
+@skip_no_data
+def test_dataset_deterministic_no_shuffle():
+    """With shuffle_buffer=0, two iterations yield the same first sample."""
+    ds = LCZeroV6Dataset(folders=[REAL_DATA_DIR], shuffle_buffer=0)
+    a, _ = next(iter(ds))
+    b, _ = next(iter(ds))
+    assert torch.equal(a, b)
+
+
+@skip_no_data
+def test_dataset_shuffle_changes_order():
+    """With shuffle_buffer > 0, the stream is permuted (the first sample is
+    very unlikely to remain identical across runs with the same seed because
+    reservoir sampling pops a random element after the buffer fills)."""
+    ds_a = LCZeroV6Dataset(folders=[REAL_DATA_DIR], shuffle_buffer=64, seed=0)
+    ds_b = LCZeroV6Dataset(folders=[REAL_DATA_DIR], shuffle_buffer=64, seed=1)
+    a, _ = next(iter(ds_a))
+    b, _ = next(iter(ds_b))
+    # Different seeds and a non-trivial buffer should give a non-equal
+    # first sample with overwhelming probability.
+    assert not torch.equal(a, b), "shuffle ineffective"
