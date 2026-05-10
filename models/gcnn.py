@@ -555,7 +555,11 @@ class GCNNBody(nn.Module):
         # respect. ChessLiftingConv constrains its weights to make the
         # input layer equivariant under the FULL chess sigma_c action.
         # See ChessLiftingConv docstring for the constraint derivation.
-        self.input_conv = ChessLiftingConv(filters, 3, padding=1, bias=True)
+        
+        #(TODO) Lifting Conv versus ChessLiftingConv
+        self.inpupt_conv = LiftingConv(34 ,filters, padding = 1, bias = True)
+        #self.input_conv = ChessLiftingConv(filters, 3, padding=1, bias=True)
+        
         self.input_bn = GBatchNorm(filters)
         self.blocks = nn.ModuleList(
             [GResBlock(filters, se_channels) for _ in range(blocks)]
