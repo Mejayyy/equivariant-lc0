@@ -557,7 +557,7 @@ class GCNNBody(nn.Module):
         # See ChessLiftingConv docstring for the constraint derivation.
         
         #(TODO) Lifting Conv versus ChessLiftingConv
-        self.inpupt_conv = LiftingConv(34 ,filters, padding = 1, bias = True)
+        self.input_conv = LiftingConv(34, filters, kernel_size=3, padding=1, bias=True)
         #self.input_conv = ChessLiftingConv(filters, 3, padding=1, bias=True)
         
         self.input_bn = GBatchNorm(filters)
