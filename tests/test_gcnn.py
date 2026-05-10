@@ -15,6 +15,7 @@ import torch
 
 from models.gcnn import (
     GROUP_SIZE,
+    ChessLiftingConv,
     GBatchNorm,
     GConv,
     GLinear,
@@ -23,6 +24,7 @@ from models.gcnn import (
     group_action_g_signal,
     regular_rep_perm,
 )
+from symmetry.actions import group_action_input
 from symmetry.actions import group_action_output as spatial_action
 from symmetry.group import COMPOSITION_TABLE, ELEMENTS, GChess
 
@@ -242,6 +244,88 @@ def test_gse_layer_equivariance(g):
 
     diff = (out_gx - g_out_x).abs().max().item()
     assert diff < 1e-5, f"GSELayer equivariance failed for {g.name}: max diff = {diff}"
+
+
+# ---------------------------------------------------------------------------
+# ChessLiftingConv: equivariance under the FULL chess input action
+# (sigma_c includes channel permutation + plane-30 negation, not just
+# spatial flip — plain LiftingConv is not equivariant under it).
+# ---------------------------------------------------------------------------
+
+
+def _sample_chess_input(batch=2, seed=0):
+    """Sample a 34-plane chess-style input for ChessLiftingConv tests."""
+    g = torch.Generator().manual_seed(seed)
+    x = torch.zeros(batch, 34, 8, 8)
+    x[:, 0:12] = (torch.rand(batch, 12, 8, 8, generator=g) > 0.85).float()
+    x[:, 12] = (torch.rand(batch, 8, 8, generator=g) > 0.9).float()
+    x[:, 13:25] = (torch.rand(batch, 12, 8, 8, generator=g) > 0.85).float()
+    x[:, 25] = (torch.rand(batch, 8, 8, generator=g) > 0.9).float()
+    x[:, 26:30] = (torch.rand(batch, 4, 8, 8, generator=g) > 0.5).float()
+    side = (torch.rand(batch, generator=g) > 0.5).float()
+    x[:, 30] = side.view(batch, 1, 1).expand(batch, 8, 8)
+    x[:, 31] = torch.rand(batch, generator=g).view(batch, 1, 1).expand(batch, 8, 8)
+    x[:, 32] = 0.0
+    x[:, 33] = 1.0
+    return x
+
+
+def test_chess_lifting_conv_shape():
+    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
+    x = _sample_chess_input()
+    y = layer(x)
+    assert y.shape == (2, 4 * GROUP_SIZE, 8, 8)
+
+
+def test_chess_lifting_conv_plane_30_kernel_is_zero():
+    """The sigma_c-equivariance constraint zeros plane 30's kernel."""
+    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
+    kernel = layer._build_kernel()  # (4*|G|, 34, 3, 3)
+    assert torch.equal(kernel[:, 30], torch.zeros_like(kernel[:, 30]))
+
+
+def test_chess_lifting_conv_paired_kernels_equal():
+    """Sanity: kernel slices for sigma_c-paired channels are equal."""
+    from symmetry.actions import SIGMA_C_CHANNEL_PERM
+
+    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
+    kernel = layer._build_kernel()  # (4*|G|, 34, 3, 3) — for the e-group slice (g=0).
+    # Take only the g=0 sub-kernel: kernel[c*|G|+0, :, :, :] for c in 0..3.
+    # In our c-major folding that's kernel[0::|G|].
+    e_kernel = kernel[0::GROUP_SIZE]  # (4, 34, 3, 3)
+    for c in range(34):
+        if c == 30:
+            continue
+        partner = SIGMA_C_CHANNEL_PERM[c]
+        if partner == c:
+            continue  # singleton orbit — trivially equal to self
+        assert torch.equal(e_kernel[:, c], e_kernel[:, partner]), (
+            f"kernel slices {c} and {partner} should be equal"
+        )
+
+
+@pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
+def test_chess_lifting_conv_equivariance_full_input_action(g):
+    """The DOD: ChessLiftingConv(group_action_input(g, x)) equals
+    g . ChessLiftingConv(x), where the input action is the FULL chess
+    sigma_c (rank flip + channel perm + plane-30 negate) and the output
+    action is the standard G-signal action."""
+    torch.manual_seed(0)
+    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
+    layer.eval()
+
+    x = _sample_chess_input()
+    gx = group_action_input(g, x)  # FULL chess action, not just spatial
+
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = group_action_g_signal(g, out_x, num_logical_channels=4)
+
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, (
+        f"ChessLiftingConv {g.name}: max diff = {diff}"
+    )
 
 
 # ---------------------------------------------------------------------------

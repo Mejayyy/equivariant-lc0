@@ -168,6 +168,141 @@ class LiftingConv(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# ChessLiftingConv: chess-input (Z^2 with 34 specific planes) -> G signal
+# ---------------------------------------------------------------------------
+
+
+class ChessLiftingConv(nn.Module):
+    """LiftingConv specialized for the 34-plane chess input.
+
+    A plain `LiftingConv` is equivariant under *pure spatial* group actions,
+    but `sigma_c` on the chess input is NOT pure spatial — it also permutes
+    the 34 input channels (us<->opp swap on planes 0..11, history us<->opp
+    swap on 13..24, castling swap 26<->28 and 27<->29) and **negates**
+    plane 30 (side-to-move). Plain LiftingConv ignores this and produces
+    O(1) equivariance error on `sigma_c`.
+
+    Constraints derived from `LiftingConv(sigma_c . x) == sigma_c . output`
+    with `sigma_c . x = rank_flip(channel_perm(plane30_negate(x)))`:
+
+      1. `K[:, 30, :, :] = 0`. Plane 30's negation is affine; the only
+         linearly-equivariant accommodation is to zero its kernel. This
+         loses some signal, but the side-to-move information also lives
+         in the us/opp piece arrangement, so the network can still infer
+         it.
+
+      2. `K[:, i, :, :] = K[:, SIGMA_C_CHANNEL_PERM[i], :, :]` for every
+         non-30 channel pair. I.e., the kernel for channel i is *shared*
+         with the kernel for its sigma_c-paired partner (e.g. our pawns
+         (channel 0) and opp pawns (channel 6) use the same kernel).
+
+    Implementation: parameterize a free weight tensor of shape
+    `(out_C, NUM_REPS, k, k)` where `NUM_REPS = 19` is the number of
+    sigma_c orbits on {0..33} \\ {30}. At forward time, expand to a full
+    `(out_C * |G|, 34, k, k)` Conv2d kernel by indexing this free
+    parameter via the per-input-channel orbit map and zeroing out plane
+    30. Then apply the standard LiftingConv "spatial-flip per group
+    element" structure on top.
+
+    This is mathematically equivalent to a constrained 34-channel kernel,
+    but uses ~half the parameters (19 vs 34 effective groups).
+    """
+
+    @staticmethod
+    def _build_orbit_map() -> "torch.Tensor":
+        """For each input channel 0..33, return the orbit-rep index in
+        EQUIV_REPS (or -1 for plane 30 which is constrained to zero)."""
+        # Lazy import to avoid pulling symmetry.actions into the gcnn
+        # primitives module at top-level (keeps the module load order clean).
+        from symmetry.actions import SIGMA_C_CHANNEL_PERM
+
+        # Each sigma_c-orbit's representative is the smaller index in the
+        # pair (or the singleton itself for fixed-point channels).
+        equiv_reps: List[int] = []
+        for c in range(34):
+            if c == 30:
+                continue  # zero-kernel; not represented
+            partner = SIGMA_C_CHANNEL_PERM[c]
+            rep = min(c, partner)
+            if rep == c:  # canonical rep = smaller index
+                equiv_reps.append(rep)
+        # Build a fixed lookup: chan_to_rep[c] = index of c's rep in
+        # equiv_reps, or -1 for plane 30.
+        rep_idx = {rep: i for i, rep in enumerate(equiv_reps)}
+        chan_to_rep_idx = torch.full((34,), -1, dtype=torch.long)
+        for c in range(34):
+            if c == 30:
+                continue
+            partner = SIGMA_C_CHANNEL_PERM[c]
+            rep = min(c, partner)
+            chan_to_rep_idx[c] = rep_idx[rep]
+        return chan_to_rep_idx
+
+    def __init__(
+        self,
+        out_channels: int,
+        kernel_size: int,
+        padding: int = 0,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.padding = padding
+
+        chan_to_rep_idx = self._build_orbit_map()
+        self.register_buffer("chan_to_rep_idx", chan_to_rep_idx, persistent=False)
+        self.num_reps = int(chan_to_rep_idx.max()) + 1  # excludes -1
+        # 19 reps for the standard 34-plane chess input.
+        assert self.num_reps == 19, (
+            f"unexpected sigma_c orbit count: {self.num_reps} (expected 19)"
+        )
+
+        self.weight = nn.Parameter(
+            torch.empty(out_channels, self.num_reps, kernel_size, kernel_size)
+        )
+        nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_channels))
+        else:
+            self.register_parameter("bias", None)
+
+    def _build_kernel(self) -> torch.Tensor:
+        """Expand to a full (out_C * |G|, 34, k, k) Conv2d kernel."""
+        # Step 1: expand (out_C, num_reps, k, k) to (out_C, 34, k, k) by
+        # indexing per input channel. Plane 30 (idx=-1) is masked to zero.
+        idx = self.chan_to_rep_idx                               # (34,)
+        mask = (idx >= 0).to(self.weight.dtype).view(1, 34, 1, 1)
+        safe_idx = idx.clamp(min=0)
+        expanded = self.weight.index_select(dim=1, index=safe_idx)  # (out_C, 34, k, k)
+        expanded = expanded * mask
+        # Step 2: stack the |G| spatially-flipped copies in c-major folding.
+        slices: List[torch.Tensor] = [
+            _spatial_g(g, expanded) for g in range(GROUP_SIZE)
+        ]
+        stacked = torch.stack(slices, dim=1)                     # (out_C, |G|, 34, k, k)
+        return stacked.reshape(
+            self.out_channels * GROUP_SIZE,
+            34,
+            self.kernel_size,
+            self.kernel_size,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] != 34:
+            raise ValueError(
+                f"ChessLiftingConv expects 34 input channels, got {x.shape[1]}"
+            )
+        kernel = self._build_kernel()
+        bias = (
+            self.bias.repeat_interleave(GROUP_SIZE)
+            if self.bias is not None
+            else None
+        )
+        return F.conv2d(x, kernel, bias, padding=self.padding)
+
+
+# ---------------------------------------------------------------------------
 # GConv: G -> G
 # ---------------------------------------------------------------------------
 
@@ -376,13 +511,120 @@ class GSELayer(nn.Module):
         return gate * x + bias
 
 
+# ---------------------------------------------------------------------------
+# Phase 8: G-residual block, body, full model
+# ---------------------------------------------------------------------------
+
+
+class GResBlock(nn.Module):
+    """G-equivariant residual block — same macro-structure as the baseline
+    ResBlock, with G-equivariant primitives substituted in:
+
+        GConv -> GBatchNorm -> ReLU -> GConv -> GBatchNorm -> GSELayer
+        skip-add input -> ReLU
+    """
+
+    def __init__(self, channels: int, se_channels: int):
+        super().__init__()
+        self.conv1 = GConv(channels, channels, 3, padding=1, bias=True)
+        self.bn1 = GBatchNorm(channels)
+        self.conv2 = GConv(channels, channels, 3, padding=1, bias=True)
+        self.bn2 = GBatchNorm(channels)
+        self.se = GSELayer(channels, se_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out = out + residual
+        return F.relu(out)
+
+
+class GCNNBody(nn.Module):
+    """Equivariant body: LiftingConv(34 -> filters) + GBN + ReLU,
+    then `blocks` x GResBlock. Output is a folded G-signal of shape
+    (B, filters * |G|, 8, 8)."""
+
+    def __init__(self, blocks: int, filters: int, se_channels: int):
+        super().__init__()
+        # ChessLiftingConv (not the generic LiftingConv) is required here:
+        # the chess input action under sigma_c includes a non-trivial
+        # channel permutation (us<->opp swap, castling swap) and a
+        # plane-30 negation, which a pure-spatial LiftingConv does not
+        # respect. ChessLiftingConv constrains its weights to make the
+        # input layer equivariant under the FULL chess sigma_c action.
+        # See ChessLiftingConv docstring for the constraint derivation.
+        self.input_conv = ChessLiftingConv(filters, 3, padding=1, bias=True)
+        self.input_bn = GBatchNorm(filters)
+        self.blocks = nn.ModuleList(
+            [GResBlock(filters, se_channels) for _ in range(blocks)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.input_bn(self.input_conv(x)))
+        for block in self.blocks:
+            x = block(x)
+        return x  # (B, filters * |G|, 8, 8)
+
+
+class GCNNChess(nn.Module):
+    """G_chess-equivariant LCZero model — same forward interface as
+    BaselineLCZero so the training/eval code is model-agnostic.
+
+        policy_logits, value_wdl, moves_left = model(x)
+        # x:             (B, 34, 8, 8)
+        # policy_logits: (B, 1858)   raw logits
+        # value_wdl:     (B, 3)      softmax [W, D, L]
+        # moves_left:    (B, 1)      ReLU output
+
+    Hyper-params identical to BaselineLCZero. Equivariance is enforced
+    by construction at every layer; verified by
+    `metrics.equivariance.equivariance_error(model) < 1e-5` for each
+    non-identity element of G_chess (see tests/test_equivariance.py).
+    """
+
+    def __init__(
+        self,
+        blocks: int = 10,
+        filters: int = 128,
+        se_channels: int = 32,
+        mlh_channels: int = 8,
+        fc_size: int = 128,
+    ):
+        super().__init__()
+        self.body = GCNNBody(blocks, filters, se_channels)
+        # Lazy import to break the gcnn <-> heads load-order cycle (heads
+        # imports primitives from gcnn at module load).
+        from .heads import (
+            EquivariantPolicyHead,
+            EquivariantValueHead,
+            InvariantMovesLeftHead,
+        )
+        self.policy_head = EquivariantPolicyHead(filters)
+        self.value_head = EquivariantValueHead(filters)
+        self.moves_left_head = InvariantMovesLeftHead(filters, mlh_channels, fc_size)
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor]":
+        if x.shape[1:] != (34, 8, 8):
+            raise ValueError(f"GCNNChess expects (B, 34, 8, 8), got {tuple(x.shape)}")
+        h = self.body(x)
+        return self.policy_head(h), self.value_head(h), self.moves_left_head(h)
+
+
 __all__ = [
     "GROUP_SIZE",
     "regular_rep_perm",
     "group_action_g_signal",
     "LiftingConv",
+    "ChessLiftingConv",
     "GConv",
     "GLinear",
     "GBatchNorm",
     "GSELayer",
+    "GResBlock",
+    "GCNNBody",
+    "GCNNChess",
 ]

@@ -244,6 +244,182 @@ def build_flat_to_policy_index() -> Dict[int, int]:
     return {flat: policy for policy, flat in enumerate(gather)}
 
 
+# ---------------------------------------------------------------------------
+# Orbit-based gather (used by EquivariantPolicyHead — Phase 8)
+# ---------------------------------------------------------------------------
+#
+# Why a different gather for the equivariant head:
+#   The lc0 AZ-style 80-channel layout (above) encodes move *direction* in
+#   the channel axis. After the equivariant-policy GConv stack +
+#   sum-over-group, the resulting (80, 8, 8) tensor is sigma_h/sigma_c-
+#   equivariant on its SPATIAL axis only — channels stay put. Hence
+#   "spatial-flip + canonical lc0 gather" does NOT reproduce
+#   build_policy_permutation for moves whose direction is itself
+#   permuted by the flip (e.g. NE <-> NW under sigma_h, NE <-> SE under
+#   sigma_c). For diagonal moves the natural permutation differs from the
+#   canonical one — equivariance fails by O(1).
+#
+# Orbit-based gather:
+#   Group the 1858 moves into Klein-4 orbits (size 4 for non-promotions,
+#   size 2 for promotions since sigma_c is identity on promotions per
+#   Phase 3 design). Each orbit is assigned to a fixed 2x2 block of cells
+#   in some output channel:
+#       cell_E  = (c, r0,    f0   )  -- orbit representative
+#       cell_H  = (c, r0,    7-f0 )  -- file-flipped (sigma_h)
+#       cell_C  = (c, 7-r0,  f0   )  -- rank-flipped (sigma_c)
+#       cell_HC = (c, 7-r0,  7-f0 )  -- both flipped (sigma_hc)
+#   with r0 in {0,1,2,3}, f0 in {0,1,2,3}, giving 16 disjoint blocks per
+#   channel. Orbits are placed sequentially: orbit k -> channel k//16,
+#   block (k%16). 481 orbits fit in 31 channels, well within 80.
+#
+#   For NON-PROMO orbit {m_E, m_H, m_C, m_HC}: each move gets ONE cell;
+#   gather[move_idx, 0] == gather[move_idx, 1] (the duplicate makes the
+#   downstream `.mean(-1)` trivial — no rank-symmetrization needed).
+#
+#   For PROMO orbit {m_E, m_H} (where sigma_c(m) = m, so the orbit only
+#   has 2 distinct moves but still occupies 4 cells): each move is
+#   placed at a rank-pair, gather[m_E] = (cell_E, cell_C) and
+#   gather[m_H] = (cell_H, cell_HC). The downstream `.mean(-1)` averages
+#   the rank-pair, making the head sigma_c-invariant on promo channels
+#   exactly as required (sigma_c rank-flip swaps the pair, the mean
+#   is unchanged).
+#
+# Equivariance proof (sketch). Let z = sum_pool of the equivariant body's
+# 80*|G|-channel output. z_after_g = (spatial_g)(z). For move i in a
+# non-promo orbit at cell (c, r0, f0):
+#   gather(z_after_h)[i] = z_after_h[(c, r0, f0)] = z[(c, r0, 7-f0)]
+#                        = z[gather[sigma_h(i)]] = gather(z)[sigma_h(i)]
+# which matches build_policy_permutation(sigma_h)(gather(z))[i].
+# Same argument for sigma_c (rank-flip) and sigma_hc (both flips).
+# For promo: gather(z)[i] = (z[cell_E] + z[cell_C]) / 2; sigma_c rank-
+# flip swaps the two cells, average is invariant -> matches "sigma_c is
+# identity on promotions". sigma_h spatially file-flips both cells of i
+# into both cells of sigma_h(i); the (averaged) value moves correctly.
+
+
+def _verify_orbit_invariants(perm_h, perm_c, perm_hc):
+    """Sanity-check that for every move i, the orbit {i, h, c, hc} has
+    size 4 (non-promo) or 2 (promo, where c==i and hc==h)."""
+    for i in range(POLICY_INDEX_SIZE):
+        h, c, hc = perm_h[i], perm_c[i], perm_hc[i]
+        if c == i:
+            # promo orbit
+            if hc != h:
+                raise ValueError(
+                    f"promo orbit invariant violated at move {i}: "
+                    f"sigma_c(i)=i but sigma_hc(i)={hc} != sigma_h(i)={h}"
+                )
+            # The other element must be distinct.
+            if h == i:
+                raise ValueError(
+                    f"degenerate orbit at move {i}: sigma_h(i)=i "
+                    f"(no chess move is sigma_h-fixed)"
+                )
+        else:
+            if len({i, h, c, hc}) != 4:
+                raise ValueError(
+                    f"non-promo orbit at {i} has duplicates: "
+                    f"{{i={i}, h={h}, c={c}, hc={hc}}}"
+                )
+
+
+def build_orbit_policy_gather(num_channels: int = POLICY_NUM_CHANNELS) -> "torch.Tensor":
+    """Build the orbit-based ``(1858, 2)`` gather buffer for the
+    equivariant policy head. See module-level comment for the rationale.
+
+    The returned tensor is suitable for use as a non-trainable buffer; the
+    head extracts logits via::
+
+        flat   = sum_pool_tensor.view(B, num_channels * 8 * 8)        # (B, C*64)
+        gathered = flat.index_select(1, gather.view(-1))             # (B, 1858*2)
+        logits = gathered.view(B, 1858, 2).mean(dim=2)               # (B, 1858)
+
+    Args:
+        num_channels: the channel count of the policy-head's last conv.
+            Must be at least ceil(481 / 16) = 31. Default 80 matches the
+            baseline policy head's channel count for parameter parity.
+
+    Returns:
+        torch.LongTensor of shape (1858, 2) with values in
+        [0, num_channels * 64).
+    """
+    # Lazy import to break the symmetry/actions <-> models/policy_map cycle.
+    from symmetry.actions import build_policy_permutation
+    from symmetry.group import GChess
+
+    perm_h = build_policy_permutation(GChess.SIGMA_H).tolist()
+    perm_c = build_policy_permutation(GChess.SIGMA_C).tolist()
+    perm_hc = build_policy_permutation(GChess.SIGMA_HC).tolist()
+    _verify_orbit_invariants(perm_h, perm_c, perm_hc)
+
+    blocks_per_channel = 16  # 4 r0 choices * 4 f0 choices, all disjoint 2x2 blocks
+    visited: List[bool] = [False] * POLICY_INDEX_SIZE
+    gather = torch.full((POLICY_INDEX_SIZE, 2), -1, dtype=torch.int64)
+
+    orbit_count = 0
+    for i in range(POLICY_INDEX_SIZE):
+        if visited[i]:
+            continue
+        h = perm_h[i]
+        c = perm_c[i]
+        hc = perm_hc[i]
+
+        chan = orbit_count // blocks_per_channel
+        if chan >= num_channels:
+            raise ValueError(
+                f"orbit-based gather needs {orbit_count + 1} orbits but only "
+                f"{num_channels * blocks_per_channel} slots are available "
+                f"({num_channels} channels x {blocks_per_channel} blocks/channel). "
+                f"Increase num_channels."
+            )
+        block_idx = orbit_count % blocks_per_channel
+        r0 = block_idx // 4
+        f0 = block_idx % 4
+
+        cell_E = chan * 64 + r0 * 8 + f0
+        cell_H = chan * 64 + r0 * 8 + (7 - f0)
+        cell_C = chan * 64 + (7 - r0) * 8 + f0
+        cell_HC = chan * 64 + (7 - r0) * 8 + (7 - f0)
+
+        is_promo = (c == i)
+        if is_promo:
+            # 2 distinct moves; each occupies a rank-pair so that the
+            # downstream mean enforces sigma_c-rank-invariance.
+            gather[i, 0] = cell_E
+            gather[i, 1] = cell_C
+            gather[h, 0] = cell_H
+            gather[h, 1] = cell_HC
+            visited[i] = True
+            visited[h] = True
+        else:
+            gather[i, 0] = cell_E
+            gather[i, 1] = cell_E
+            gather[h, 0] = cell_H
+            gather[h, 1] = cell_H
+            gather[c, 0] = cell_C
+            gather[c, 1] = cell_C
+            gather[hc, 0] = cell_HC
+            gather[hc, 1] = cell_HC
+            visited[i] = True
+            visited[h] = True
+            visited[c] = True
+            visited[hc] = True
+
+        orbit_count += 1
+
+    if not all(visited):
+        missing = [i for i, v in enumerate(visited) if not v]
+        raise RuntimeError(f"unvisited moves after orbit walk: {missing[:10]} ...")
+    if (gather < 0).any():
+        raise RuntimeError("uninitialized gather entries")
+    if (gather >= num_channels * 64).any():
+        raise RuntimeError(
+            f"gather entry out of range; max={int(gather.max())} >= "
+            f"{num_channels * 64}"
+        )
+    return gather
+
+
 __all__ = [
     "POLICY_INDEX_SIZE",
     "POLICY_NUM_CHANNELS",
@@ -256,4 +432,5 @@ __all__ = [
     "move_to_uci",
     "build_policy_gather_indices",
     "build_flat_to_policy_index",
+    "build_orbit_policy_gather",
 ]
