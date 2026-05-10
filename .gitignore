@@ -1,4 +1,5 @@
 raw_data/
+*.gz
 runs/
 .venv/
 __pycache__/
