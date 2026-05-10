@@ -1,4 +1,14 @@
 from .baseline import BaselineBody, BaselineLCZero, ResBlock, SELayer
+from .gcnn import (
+    GROUP_SIZE,
+    GBatchNorm,
+    GConv,
+    GLinear,
+    GSELayer,
+    LiftingConv,
+    group_action_g_signal,
+    regular_rep_perm,
+)
 from .heads import (
     BaselineMovesLeftHead,
     BaselinePolicyHead,
@@ -37,4 +47,13 @@ __all__ = [
     "BaselinePolicyHead",
     "BaselineValueHead",
     "BaselineMovesLeftHead",
+    # gcnn primitives
+    "GROUP_SIZE",
+    "LiftingConv",
+    "GConv",
+    "GLinear",
+    "GBatchNorm",
+    "GSELayer",
+    "regular_rep_perm",
+    "group_action_g_signal",
 ]
