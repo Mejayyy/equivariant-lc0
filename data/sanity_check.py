@@ -71,7 +71,8 @@ def planes_to_board(planes: np.ndarray) -> chess.Board:
     for those. The rook-finding heuristic walks each side's back rank to
     locate the queen-side and king-side rooks.
     """
-    black_to_move = bool(planes[30, 0, 0])
+    # Plane 30 is signed: +1 -> black-to-move, -1 -> white-to-move.
+    black_to_move = float(planes[30, 0, 0]) > 0.0
 
     if not black_to_move:
         white_p = planes[0:6]
@@ -188,7 +189,7 @@ def main() -> int:
         probs = targets["policy"]
         # argsort works correctly even with -1 sentinels (negatives sink).
         top3 = np.argsort(-probs)[:3].tolist()
-        black_to_move = bool(planes[30, 0, 0])
+        black_to_move = float(planes[30, 0, 0]) > 0.0
 
         top3_lines: List[str] = []
         top3_legality = []

@@ -131,8 +131,10 @@ def test_round_trip_100_records_planes():
         assert planes.shape == (34, 8, 8)
         assert planes.dtype == np.float32
 
-        # Piece + flag planes (0..30) are binary 0/1.
-        assert ((planes[:31] == 0.0) | (planes[:31] == 1.0)).all()
+        # Piece + flag planes (0..29) are binary 0/1.
+        assert ((planes[:30] == 0.0) | (planes[:30] == 1.0)).all()
+        # Plane 30 (side-to-move) is signed: -1 (white) or +1 (black).
+        assert ((planes[30] == -1.0) | (planes[30] == 1.0)).all()
         # rule50 plane in [0, 1].
         assert (planes[31] >= 0.0).all() and (planes[31] <= 1.0).all()
         # Constants.
@@ -144,7 +146,9 @@ def test_round_trip_100_records_planes():
         assert int(planes[11].sum()) == 1, f"opp-king count != 1: {planes[11].sum()}"
 
         # Side-to-move flag must agree with parser-derived side.
-        assert float(planes[30, 0, 0]) == float(get_side_to_move(rec))
+        # 0 (white) -> -1.0 plane value; 1 (black) -> +1.0.
+        expected = 1.0 if get_side_to_move(rec) else -1.0
+        assert float(planes[30, 0, 0]) == expected
 
 
 # ---------------------------------------------------------------------------

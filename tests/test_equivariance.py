@@ -39,12 +39,19 @@ def test_sample_chess_input_constant_planes():
     assert (x[:, 33] == 1.0).all()
 
 
-def test_sample_chess_input_side_to_move_is_binary():
-    """Plane 30 must be exactly 0 or 1 — sigma_c flips it as 1 - x[30],
-    which is bit-exact only for binary inputs."""
-    x = sample_chess_input(batch_size=8)
+def test_sample_chess_input_side_to_move_is_signed():
+    """Plane 30 is signed: exactly -1 (white) or +1 (black).
+
+    sigma_c on plane 30 is now a pure sign flip ``-x[30]``; bit-exact
+    self-inversion ``-(-x) == x`` holds in IEEE-754, so equivariance
+    tests stay clean.
+    """
+    x = sample_chess_input(batch_size=16)
     side = x[:, 30]
-    assert torch.equal(side, side.bool().float())
+    unique = torch.unique(side)
+    assert set(unique.tolist()).issubset({-1.0, 1.0}), (
+        f"plane 30 has unexpected values: {unique.tolist()}"
+    )
 
 
 # ---------------------------------------------------------------------------

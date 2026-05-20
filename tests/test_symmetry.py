@@ -36,9 +36,10 @@ from models.policy_map import (
 def make_random_input(batch=2, seed=0):
     """Sample inputs matching CLAUDE.md sampling convention.
 
-    Plane 30 (side-to-move) MUST be exactly 0.0 or 1.0 — otherwise
-    1 - (1 - x) is not bit-exact under IEEE-754, breaking the
-    invertibility test.
+    Plane 30 (side-to-move) is signed in {-1, +1} (white=-1, black=+1).
+    sigma_c on plane 30 is now a pure sign flip ``-x[30]`` (linear),
+    and ``-(-x) == x`` is bit-exact under IEEE-754 — so the
+    invertibility tests still pass exactly.
     """
     g = torch.Generator().manual_seed(seed)
     x = torch.zeros(batch, 34, 8, 8)
@@ -47,7 +48,8 @@ def make_random_input(batch=2, seed=0):
     x[:, 13:25] = (torch.rand(batch, 12, 8, 8, generator=g) > 0.85).float()
     x[:, 25] = (torch.rand(batch, 8, 8, generator=g) > 0.9).float()
     x[:, 26:30] = (torch.rand(batch, 4, 8, 8, generator=g) > 0.5).float()
-    side = (torch.rand(batch, generator=g) > 0.5).float()
+    # Side-to-move: -1 (white) or +1 (black).
+    side = 2.0 * (torch.rand(batch, generator=g) > 0.5).float() - 1.0
     x[:, 30] = side.view(batch, 1, 1).expand(batch, 8, 8)
     rule50 = torch.rand(batch, generator=g)
     x[:, 31] = rule50.view(batch, 1, 1).expand(batch, 8, 8)
@@ -198,13 +200,13 @@ def test_sigma_c_swaps_castling():
 
 
 def test_sigma_c_flips_side_to_move():
-    """Plane 30 must be 1 - x[30] under sigma_c."""
+    """Plane 30 is signed in {-1, +1}; sigma_c negates it (linear sign flip)."""
     x = torch.zeros(1, 34, 8, 8)
     x[0, 30] = 1.0
     y = group_action_input(GChess.SIGMA_C, x)
-    assert torch.all(y[0, 30] == 0.0)
+    assert torch.all(y[0, 30] == -1.0)
 
-    x[0, 30] = 0.0
+    x[0, 30] = -1.0
     y = group_action_input(GChess.SIGMA_C, x)
     assert torch.all(y[0, 30] == 1.0)
 

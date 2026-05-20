@@ -87,7 +87,14 @@ def v6_to_34_planes(record: V6Record) -> np.ndarray:
     out[28] = float(record.castling_them_ooo)
     out[29] = float(record.castling_them_oo)
 
-    out[30] = float(get_side_to_move(record))
+    # Plane 30 (side-to-move) is encoded as a SIGNED scalar:
+    #   white-to-move -> -1.0,  black-to-move -> +1.0
+    # This makes sigma_c act on plane 30 as a pure SIGN FLIP
+    # (x[30] -> -x[30]) — a linear operation, much cleaner to reason
+    # about than the prior `1 - x[30]` affine flip on a {0, 1}
+    # encoding. See PROGRESS.md for the discussion and CLAUDE.md's
+    # "Input Channel Specification" for the canonical layout.
+    out[30] = 1.0 if get_side_to_move(record) else -1.0
     out[31] = record.rule50_count / 100.0
     out[32] = 0.0
     out[33] = 1.0

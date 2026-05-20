@@ -254,7 +254,7 @@ def test_gse_layer_equivariance(g):
 
 
 def _sample_chess_input(batch=2, seed=0):
-    """Sample a 34-plane chess-style input for ChessLiftingConv tests."""
+    """Sample a 34-plane chess-style input. Plane 30 in {-1, +1}."""
     g = torch.Generator().manual_seed(seed)
     x = torch.zeros(batch, 34, 8, 8)
     x[:, 0:12] = (torch.rand(batch, 12, 8, 8, generator=g) > 0.85).float()
@@ -262,7 +262,7 @@ def _sample_chess_input(batch=2, seed=0):
     x[:, 13:25] = (torch.rand(batch, 12, 8, 8, generator=g) > 0.85).float()
     x[:, 25] = (torch.rand(batch, 8, 8, generator=g) > 0.9).float()
     x[:, 26:30] = (torch.rand(batch, 4, 8, 8, generator=g) > 0.5).float()
-    side = (torch.rand(batch, generator=g) > 0.5).float()
+    side = 2.0 * (torch.rand(batch, generator=g) > 0.5).float() - 1.0
     x[:, 30] = side.view(batch, 1, 1).expand(batch, 8, 8)
     x[:, 31] = torch.rand(batch, generator=g).view(batch, 1, 1).expand(batch, 8, 8)
     x[:, 32] = 0.0

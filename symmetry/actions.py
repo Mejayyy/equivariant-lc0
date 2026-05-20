@@ -41,11 +41,20 @@ assert len(SIGMA_C_CHANNEL_PERM) == 34
 
 
 def _apply_sigma_c_input(x: torch.Tensor) -> torch.Tensor:
-    """sigma_c on (B, 34, 8, 8): rank flip + channel swap + plane-30 negate."""
+    """sigma_c on (B, 34, 8, 8): rank flip + channel swap + plane-30 sign flip.
+
+    Plane 30 (side-to-move) is encoded as a SIGNED scalar in {-1, +1}
+    (white = -1, black = +1; see data/extract_planes.py). Under sigma_c,
+    it transforms as a pure sign flip ``x[30] -> -x[30]`` — a linear
+    operation. The prior `{0, 1}` encoding required `1 - x[30]`, which
+    is affine; the linear version is much cleaner to reason about and
+    eliminates a constant offset that would otherwise propagate through
+    a convolution.
+    """
     x = torch.flip(x, dims=[-2])
     perm = torch.tensor(SIGMA_C_CHANNEL_PERM, device=x.device, dtype=torch.long)
     x = x.index_select(dim=1, index=perm)
-    x[:, 30] = 1.0 - x[:, 30]
+    x[:, 30] = -x[:, 30]
     return x
 
 
