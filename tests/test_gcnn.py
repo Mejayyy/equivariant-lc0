@@ -67,9 +67,16 @@ def test_lifting_conv_shape():
 
 
 @pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
-def test_lifting_conv_equivariance(g):
-    """For a Z^2 input x, LiftConv(spatial_g . x) == g . LiftConv(x), where
-    g acts on the output as the full G-signal action (regular rep + flip)."""
+def test_lifting_conv_equivariance_generic(g):
+    """Pure-spatial equivariance check for the LiftingConv kernel-stacking
+    construction itself, divorced from chess input semantics.
+
+    Input has no group dim and no chess channel-permutation under g, so
+    the input action degenerates to a pure spatial flip. This validates
+    that ``out[:, c*|G|+g, ...] = (g . K_base[c]) * x`` is built and applied
+    correctly — independent of the 34-plane chess input action that
+    real chess use requires (see test_lifting_conv_equivariance for that).
+    """
     torch.manual_seed(0)
     layer = LiftingConv(in_channels=5, out_channels=4, kernel_size=3, padding=1)
     layer.eval()
@@ -83,7 +90,129 @@ def test_lifting_conv_equivariance(g):
         g_out_x = group_action_g_signal(g, out_x, num_logical_channels=4)
 
     diff = (out_gx - g_out_x).abs().max().item()
-    assert diff < 1e-5, f"LiftingConv equivariance failed for {g.name}: max diff = {diff}"
+    assert diff < 1e-5, (
+        f"LiftingConv generic equivariance failed for {g.name}: max diff = {diff}"
+    )
+
+
+@pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
+def test_lifting_conv_equivariance(g):
+    """Equivariance under the FULL chess input action — the test that
+    actually matters for the model's correctness end-to-end.
+
+    Input: 34-plane chess input (signed plane 30, etc.).
+    Input action: `group_action_input(g, x)` — spatial flip + sigma_c
+        channel permutation (us<->opp, castling) + sigma_c sign flip on
+        plane 30. NOT just a spatial flip.
+    Output action: `group_action_g_signal(g, ...)` — regular rep on the
+        group axis + spatial flip on the body output.
+
+    Plain LiftingConv (unconstrained weights) FAILS this test for sigma_c
+    (max diff ~2.4) because zero-padding makes plane-30's contribution
+    spatially non-uniform; the kernel constraints derived in
+    `ChessLiftingConv` are required to make the input layer
+    sigma_c-equivariant. This test is the canonical correctness check
+    for the input layer of GCNNChess.
+    """
+    torch.manual_seed(0)
+    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
+    layer.eval()
+
+    x = _sample_chess_input()
+    gx = group_action_input(g, x)  # FULL chess action
+
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = group_action_g_signal(g, out_x, num_logical_channels=4)
+
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, (
+        f"Lifting-conv equivariance failed for {g.name}: max diff = {diff}"
+    )
+
+
+def test_lifting_conv_parameter_count():
+    """LiftingConv(34, C_out, k) holds exactly C_out * 34 * k * k weights
+    plus C_out bias params (no per-group-slice copies — the |G|
+    spatially-transformed kernels are constructed at forward time from a
+    single base K)."""
+    C_in, C_out, k = 34, 7, 3
+    layer = LiftingConv(in_channels=C_in, out_channels=C_out, kernel_size=k, padding=1, bias=True)
+    actual = sum(p.numel() for p in layer.parameters())
+    expected = C_out * C_in * k * k + C_out
+    assert actual == expected, f"expected {expected} params, got {actual}"
+
+    # Also check bias=False drops the bias term.
+    layer_nb = LiftingConv(in_channels=C_in, out_channels=C_out, kernel_size=k, padding=1, bias=False)
+    assert sum(p.numel() for p in layer_nb.parameters()) == C_out * C_in * k * k
+
+
+def test_lifting_conv_nonzero_bias():
+    """LiftingConv's bias is per LOGICAL output channel, broadcast across
+    (a) all |G| group copies of that channel and (b) all spatial positions.
+
+    Verified in two parts:
+      (a) zero-kernel pass: output is entirely the bias contribution, so
+          every (g, r, f) entry of logical channel c must equal bias[c].
+      (b) center-only-kernel pass at an interior position: manual
+          computation of the expected output (kernel * x at the center +
+          bias[c]) matches the actual output, and the |G| group slices
+          all carry the same value (since a center-only 3x3 kernel is
+          fixed by every spatial flip).
+    """
+    # --- (a) bias broadcast with a zero kernel ---
+    layer = LiftingConv(in_channels=2, out_channels=3, kernel_size=3, padding=1, bias=True)
+    with torch.no_grad():
+        layer.weight.zero_()
+        layer.bias.copy_(torch.tensor([10.0, 20.0, 30.0]))
+    layer.eval()
+
+    x = torch.randn(2, 2, 8, 8)
+    with torch.no_grad():
+        out = layer(x)
+    assert out.shape == (2, 3 * GROUP_SIZE, 8, 8)
+    bias_vals = layer.bias.detach().tolist()
+    for c in range(3):
+        expected_val = bias_vals[c]
+        for g_idx in range(GROUP_SIZE):
+            channel_slice = out[:, c * GROUP_SIZE + g_idx, :, :]
+            assert torch.allclose(
+                channel_slice,
+                torch.full_like(channel_slice, expected_val),
+                atol=1e-6,
+            ), f"c={c}, g={g_idx}: expected bias={expected_val} broadcast"
+
+    # --- (b) manual computation at an interior position ---
+    layer2 = LiftingConv(in_channels=2, out_channels=3, kernel_size=3, padding=1, bias=True)
+    with torch.no_grad():
+        layer2.weight.zero_()
+        # Center-only kernel: K[c, 0, 1, 1] = c+1, K[c, 1, 1, 1] = -(c+1).
+        # Center positions are fixed under every spatial flip, so
+        # spatial_g K == K for all g; all |G| copies must produce the
+        # same value.
+        for c in range(3):
+            layer2.weight[c, 0, 1, 1] = float(c + 1)
+            layer2.weight[c, 1, 1, 1] = -float(c + 1)
+        layer2.bias.copy_(torch.tensor([10.0, 20.0, 30.0]))
+    layer2.eval()
+
+    torch.manual_seed(0)
+    x2 = torch.randn(1, 2, 8, 8)
+    with torch.no_grad():
+        out2 = layer2(x2)
+
+    bias2_vals = layer2.bias.detach().tolist()
+    # Pick interior (r, f) = (3, 4) so the 3x3 kernel sees only board pixels.
+    for c in range(3):
+        x0 = x2[0, 0, 3, 4].item()
+        x1 = x2[0, 1, 3, 4].item()
+        expected = (c + 1) * x0 - (c + 1) * x1 + bias2_vals[c]
+        for g_idx in range(GROUP_SIZE):
+            actual = out2[0, c * GROUP_SIZE + g_idx, 3, 4].item()
+            assert abs(actual - expected) < 1e-5, (
+                f"c={c}, g={g_idx}: actual={actual}, expected={expected}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -100,20 +229,27 @@ def test_gconv_shape():
 
 @pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
 def test_gconv_equivariance(g):
-    torch.manual_seed(0)
-    layer = GConv(in_channels=4, out_channels=6, kernel_size=3, padding=1)
-    layer.eval()
+    """Run three independent random initializations + random inputs per g
+    so we don't only validate one specific weight/input configuration.
+    Seeds are deterministic per (g, sample) for reproducibility."""
+    for sample in range(3):
+        torch.manual_seed(int(g) * 1000 + sample)
+        layer = GConv(in_channels=4, out_channels=6, kernel_size=3, padding=1)
+        layer.eval()
 
-    x = torch.randn(2, 4 * GROUP_SIZE, 8, 8)
-    gx = group_action_g_signal(g, x, num_logical_channels=4)
+        x = torch.randn(2, 4 * GROUP_SIZE, 8, 8)
+        gx = group_action_g_signal(g, x, num_logical_channels=4)
 
-    with torch.no_grad():
-        out_x = layer(x)
-        out_gx = layer(gx)
-        g_out_x = group_action_g_signal(g, out_x, num_logical_channels=6)
+        with torch.no_grad():
+            out_x = layer(x)
+            out_gx = layer(gx)
+            g_out_x = group_action_g_signal(g, out_x, num_logical_channels=6)
 
-    diff = (out_gx - g_out_x).abs().max().item()
-    assert diff < 1e-5, f"GConv equivariance failed for {g.name}: max diff = {diff}"
+        diff = (out_gx - g_out_x).abs().max().item()
+        assert diff < 1e-5, (
+            f"GConv equivariance failed for {g.name}, sample={sample}: "
+            f"max diff = {diff}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -304,28 +440,11 @@ def test_chess_lifting_conv_paired_kernels_equal():
         )
 
 
-@pytest.mark.parametrize("g", [GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC])
-def test_chess_lifting_conv_equivariance_full_input_action(g):
-    """The DOD: ChessLiftingConv(group_action_input(g, x)) equals
-    g . ChessLiftingConv(x), where the input action is the FULL chess
-    sigma_c (rank flip + channel perm + plane-30 negate) and the output
-    action is the standard G-signal action."""
-    torch.manual_seed(0)
-    layer = ChessLiftingConv(out_channels=4, kernel_size=3, padding=1)
-    layer.eval()
-
-    x = _sample_chess_input()
-    gx = group_action_input(g, x)  # FULL chess action, not just spatial
-
-    with torch.no_grad():
-        out_x = layer(x)
-        out_gx = layer(gx)
-        g_out_x = group_action_g_signal(g, out_x, num_logical_channels=4)
-
-    diff = (out_gx - g_out_x).abs().max().item()
-    assert diff < 1e-5, (
-        f"ChessLiftingConv {g.name}: max diff = {diff}"
-    )
+# NOTE: full-chess-input equivariance for ChessLiftingConv is now exercised
+# by `test_lifting_conv_equivariance` above (the renamed canonical test),
+# which uses 34-channel chess input + `group_action_input` + `group_action_g_signal`.
+# The legacy `test_chess_lifting_conv_equivariance_full_input_action` was
+# removed to avoid duplicate coverage.
 
 
 # ---------------------------------------------------------------------------
