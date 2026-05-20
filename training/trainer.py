@@ -265,7 +265,19 @@ def train(args: argparse.Namespace) -> None:
     print(f"[init] output_dir={out_dir}  log={log_path.name}")
 
     log_file = open(log_path, "a")
-
+    """
+    # --- Added n_params in the run
+    if start_step == 0:  # Only write this if we aren't resuming a previous run
+        log_file.write(
+            json.dumps({
+                "phase": "init",
+                "model": args.model,
+                "total_parameters": n_params
+            }) + "\n"
+        )
+        log_file.flush()
+    # -------------------------------
+    """
     print(
         f"[train] starting at step {start_step + 1} -> {args.max_steps}  "
         f"(batch={args.batch_size}, lr={args.lr})"
@@ -327,7 +339,34 @@ def train(args: argparse.Namespace) -> None:
             save_checkpoint(ck_path, model, optimizer, step, config_dict)
             print(f"          checkpoint -> {ck_path.name}")
 
+
+# --- TOTAL TIME IN JSON ---
+    total_time = time.time() - t0
+    total_time_str = f"{total_time / 60:.2f} minutes"
+
+    print(f"[train] done. Total time: {total_time_str}.")
+
+    # Write a final summary line to the JSONL file
+    log_file.write(
+        json.dumps({
+            "phase": "summary",
+            "total_time_seconds": total_time,
+            "total_time_minutes": total_time / 60
+        }) + "\n"
+    )
+    # -------------------------------
     log_file.close()
+
+    # Render the 4-panel train/val loss curves (total + per-head). Failure
+    # to plot must not abort the run — checkpoints + JSONL log are the
+    # canonical artifacts; the PNG is a convenience and can also be
+    # regenerated post-hoc via `python -m training.plot <output-dir>`.
+    try:
+        from .plot import plot_run
+        plot_run(out_dir, save=True, show=False)
+    except Exception as exc:
+        print(f"[train] plot failed (non-fatal): {exc}")
+
     print("[train] done.")
 
 

@@ -225,3 +225,63 @@ def test_checkpoint_round_trip_preserves_outputs(tmp_path, model_name):
         assert torch.allclose(a, b, atol=1e-6), (
             f"{model_name}/{name} round-trip diff = {(a - b).abs().max().item()}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_log(path, train_steps=(100, 200, 300), val_steps=(200,)):
+    import json as _json
+    with open(path, "w") as f:
+        for s in train_steps:
+            f.write(_json.dumps({
+                "step": s, "phase": "train",
+                "loss_avg": 5.0 - s / 100,
+                "policy": 3.0 - s / 200,
+                "value": 1.0,
+                "mlh": 100.0 - s / 10,
+                "samples_per_sec": 50,
+            }) + "\n")
+        for s in val_steps:
+            f.write(_json.dumps({
+                "step": s, "phase": "val",
+                "total": 5.5, "policy": 3.5, "value": 1.2, "mlh": 105.0,
+            }) + "\n")
+        # A summary record the parser should ignore
+        f.write(_json.dumps({"phase": "summary", "total_time_seconds": 1.2}) + "\n")
+
+
+def test_plot_run_creates_png(tmp_path):
+    from training.plot import plot_run
+    _write_fake_log(tmp_path / "train_log.jsonl")
+    out = plot_run(tmp_path, save=True, show=False)
+    assert out is not None
+    assert out.exists()
+    assert out.suffix == ".png"
+    assert out.stat().st_size > 0
+
+
+def test_plot_run_handles_missing_log(tmp_path):
+    from training.plot import plot_run
+    with pytest.raises(FileNotFoundError):
+        plot_run(tmp_path)
+
+
+def test_plot_load_log_parses_all_four_heads(tmp_path):
+    from training.plot import _load_log
+
+    log_path = tmp_path / "train_log.jsonl"
+    _write_fake_log(log_path)
+    data = _load_log(log_path)
+    assert set(data.keys()) == {"train", "val"}
+    for phase in ("train", "val"):
+        for key in ("step", "total", "policy", "value", "mlh"):
+            assert key in data[phase]
+    # Train: 3 entries; val: 1.
+    assert len(data["train"]["step"]) == 3
+    assert len(data["val"]["step"]) == 1
+    # Total comes from "loss_avg" for train and "total" for val.
+    assert data["train"]["total"] == [5.0 - 1.0, 5.0 - 2.0, 5.0 - 3.0]
+    assert data["val"]["total"] == [5.5]

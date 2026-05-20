@@ -5,6 +5,7 @@ from .losses import (
     policy_cross_entropy,
     value_wdl_loss,
 )
+from .plot import plot_run
 from .trainer import (
     build_model,
     evaluate,
@@ -30,4 +31,6 @@ __all__ = [
     "save_checkpoint",
     "load_checkpoint",
     "train",
+    # plotting
+    "plot_run",
 ]

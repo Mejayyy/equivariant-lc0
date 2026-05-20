@@ -170,7 +170,7 @@ class LiftingConv(nn.Module):
 # ---------------------------------------------------------------------------
 # ChessLiftingConv: chess-input (Z^2 with 34 specific planes) -> G signal
 # ---------------------------------------------------------------------------
-
+#Nope
 
 class ChessLiftingConv(nn.Module):
     """LiftingConv specialized for the 34-plane chess input.
@@ -405,7 +405,7 @@ class GLinear(nn.Module):
         # kaiming_uniform expects 2D+ but with fan computed on last axis;
         # init each (out, in) slice independently.
         for g in range(GROUP_SIZE):
-            nn.init.kaiming_uniform_(self.weight[g], a=5 ** 0.5)
+            nn.init.kaiming_uniform_(self.weight[g], nonlinearity="relu")
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_channels))
         else:
@@ -499,7 +499,7 @@ class GSELayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, cg, _, _ = x.shape
-        s = x.mean(dim=[2, 3])              # (B, C * |G|) — spatial-pool only
+        s = x.mean(dim=[2, 3])               # (B, C * |G|) — spatial-pool only
         s = F.relu(self.fc1(s))             # (B, SE_C * |G|)
         s = self.fc2(s)                     # (B, 2C * |G|)
         # In c-major folding, the first C logical channels (= first C*|G|
@@ -632,3 +632,6 @@ __all__ = [
     "GCNNBody",
     "GCNNChess",
 ]
+
+
+#cd .claude\worktrees\vibrant-engelbart-fb5933
