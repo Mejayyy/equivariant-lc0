@@ -1,7 +1,6 @@
 from .baseline import BaselineBody, BaselineLCZero, ResBlock, SELayer
 from .gcnn import (
     GROUP_SIZE,
-    ChessLiftingConv,
     GBatchNorm,
     GCNNBody,
     GCNNChess,
@@ -59,7 +58,6 @@ __all__ = [
     # gcnn primitives
     "GROUP_SIZE",
     "LiftingConv",
-    "ChessLiftingConv",
     "GConv",
     "GLinear",
     "GBatchNorm",

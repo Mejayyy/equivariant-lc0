@@ -104,21 +104,57 @@ def group_action_g_signal(g, x: torch.Tensor, num_logical_channels: int,
 
 
 # ---------------------------------------------------------------------------
-# LiftingConv: Z^2 -> G
+# LiftingConv: chess Z^2 input (34, H, W) -> G_chess signal (C_out * |G|, H, W)
 # ---------------------------------------------------------------------------
 
 
 class LiftingConv(nn.Module):
-    """Lifts a Z^2 signal to a G_chess signal.
+    """G_chess-equivariant lifting layer specialized for the 34-plane
+    chess input.
 
-    Output channel order is c-major:
-        out[:, c*|G|+g, :, :] = (g . K_base[c]) * x
+    Construction (one base kernel + three chess-aware copies).
+    Start with a single base kernel `K` of shape `(C_out, 34, k, k)`.
+    The Conv2d weight applied at forward time stacks four kernels — one
+    per ``g in G_chess`` — built by applying ``g``'s full chess action
+    to ``K``:
 
-    where K_base is a single learned (C_out, C_in, k, k) kernel and `g .`
-    means apply g's spatial flip to the kernel. Equivariance comes from
-    the action of g on x being captured by the corresponding permutation
-    of the group axis in the output.
+        slice e   :   K                                      (identity)
+        slice σ_h :   spatial_file_flip(K)                   (kernel files flipped)
+        slice σ_c :   spatial_rank_flip(K[:, σ_c_perm]) * sign_σ_c
+                      (channel perm + plane-30 sign + rank flip)
+        slice σ_hc:   spatial_both_flip (K[:, σ_c_perm]) * sign_σ_c
+                      (channel perm + plane-30 sign + both flips)
+
+    where ``σ_c_perm = SIGMA_C_CHANNEL_PERM`` (us<->opp + castling swap),
+    and ``sign_σ_c`` is the 34-entry vector that is −1 at index 30 and
+    +1 elsewhere. The stacked Conv2d weight has shape
+    ``(C_out * |G|, 34, k, k)`` in c-major folding (logical channel c's
+    |G| group copies occupy contiguous indices ``c*|G| + g``).
+
+    Equivariance.
+    Under the FULL chess action on the input (``group_action_input(g, x)``
+    from ``symmetry.actions`` — spatial flip + σ_c channel permutation
+    + plane-30 sign flip), the output transforms as the standard
+    G-signal action (``group_action_g_signal``: regular representation
+    on the group axis + spatial flip on H, W).
+
+    Sketch: ``conv(K, σ_c(x))(c, r, f) = conv(σ_c_kernel(K), x)(c, 7-r, f)``
+    by the substitution ``j = σ_c_perm(i), dr' = -dr`` — the channel
+    permutation and plane-30 sign on the *input* x are exactly absorbed
+    into the corresponding kernel transformation for the σ_c output
+    slice, so the equivariance holds independently of padding edge
+    effects (which previously forced ``K[:, 30] = 0`` in the older
+    ``ChessLiftingConv`` formulation).
+
+    Bias is per logical output channel, broadcast across the |G| group
+    copies — equivariant under the regular representation.
+
+    Constraint: ``in_channels`` must be exactly 34 (the chess plane
+    layout). The layer is chess-specific by construction; a generic-rank
+    Z^2 lifting layer doesn't apply here.
     """
+
+    IN_CHANNELS = 34  # the chess 34-plane layout
 
     def __init__(
         self,
@@ -129,10 +165,16 @@ class LiftingConv(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
+        if in_channels != self.IN_CHANNELS:
+            raise ValueError(
+                f"LiftingConv is chess-specific: in_channels must be "
+                f"{self.IN_CHANNELS}, got {in_channels}"
+            )
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.padding = padding
+
         self.weight = nn.Parameter(
             torch.empty(out_channels, in_channels, kernel_size, kernel_size)
         )
@@ -142,15 +184,45 @@ class LiftingConv(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        # Buffers for the chess input action: σ_c channel permutation and
+        # the plane-30 sign vector. Registered as buffers so they move
+        # with .to(device) automatically.
+        from symmetry.actions import SIGMA_C_CHANNEL_PERM
+
+        chan_perm = torch.tensor(SIGMA_C_CHANNEL_PERM, dtype=torch.long)
+        self.register_buffer("sigma_c_chan_perm", chan_perm, persistent=False)
+        sign_vec = torch.ones(in_channels)
+        sign_vec[30] = -1.0
+        # Reshape so it broadcasts over (C_out, ., k, k) when multiplied.
+        self.register_buffer(
+            "sigma_c_sign", sign_vec.view(1, in_channels, 1, 1), persistent=False
+        )
+
+    def _apply_g_to_kernel(self, g: int) -> torch.Tensor:
+        """Apply g's chess input action to the base kernel `self.weight`."""
+        K = self.weight
+        if g == int(GChess.E):
+            return K
+        if g == int(GChess.SIGMA_H):
+            # Pure spatial file flip on the kernel — no channel perm, no sign.
+            return torch.flip(K, dims=[-1])
+        # σ_c and σ_hc both include channel perm + plane-30 sign flip.
+        K_perm = K.index_select(dim=1, index=self.sigma_c_chan_perm)
+        K_signed = K_perm * self.sigma_c_sign.to(K.dtype)
+        if g == int(GChess.SIGMA_C):
+            return torch.flip(K_signed, dims=[-2])
+        if g == int(GChess.SIGMA_HC):
+            return torch.flip(K_signed, dims=[-2, -1])
+        raise ValueError(f"unknown group element {g}")
+
     def _build_kernel(self) -> torch.Tensor:
-        """Stack the |G| spatially-transformed kernels into a single
-        (C_out * |G|, C_in, k, k) weight tensor. Position c*|G|+g holds
-        (g . K_base[c, :, :, :])."""
+        """Stack the |G| chess-action-transformed kernels into a single
+        ``(C_out * |G|, 34, k, k)`` Conv2d weight. Position c*|G|+g holds
+        the kernel corresponding to output group slice g."""
         slices: List[torch.Tensor] = [
-            _spatial_g(g, self.weight) for g in range(GROUP_SIZE)
+            self._apply_g_to_kernel(g) for g in range(GROUP_SIZE)
         ]
-        # stacked: (C_out, |G|, C_in, k, k)  via stacking on a new dim AFTER C_out.
-        stacked = torch.stack(slices, dim=1)
+        stacked = torch.stack(slices, dim=1)  # (C_out, |G|, 34, k, k)
         return stacked.reshape(
             self.out_channels * GROUP_SIZE,
             self.in_channels,
@@ -159,146 +231,16 @@ class LiftingConv(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] != self.IN_CHANNELS:
+            raise ValueError(
+                f"LiftingConv expects {self.IN_CHANNELS} input channels, "
+                f"got {x.shape[1]}"
+            )
         kernel = self._build_kernel()
         if self.bias is None:
             bias = None
         else:
             bias = self.bias.repeat_interleave(GROUP_SIZE)
-        return F.conv2d(x, kernel, bias, padding=self.padding)
-
-
-# ---------------------------------------------------------------------------
-# ChessLiftingConv: chess-input (Z^2 with 34 specific planes) -> G signal
-# ---------------------------------------------------------------------------
-#Nope
-
-class ChessLiftingConv(nn.Module):
-    """LiftingConv specialized for the 34-plane chess input.
-
-    A plain `LiftingConv` is equivariant under *pure spatial* group actions,
-    but `sigma_c` on the chess input is NOT pure spatial — it also permutes
-    the 34 input channels (us<->opp swap on planes 0..11, history us<->opp
-    swap on 13..24, castling swap 26<->28 and 27<->29) and **negates**
-    plane 30 (side-to-move). Plain LiftingConv ignores this and produces
-    O(1) equivariance error on `sigma_c`.
-
-    Constraints derived from `LiftingConv(sigma_c . x) == sigma_c . output`
-    with `sigma_c . x = rank_flip(channel_perm(plane30_negate(x)))`:
-
-      1. `K[:, 30, :, :] = 0`. Plane 30's negation is affine; the only
-         linearly-equivariant accommodation is to zero its kernel. This
-         loses some signal, but the side-to-move information also lives
-         in the us/opp piece arrangement, so the network can still infer
-         it.
-
-      2. `K[:, i, :, :] = K[:, SIGMA_C_CHANNEL_PERM[i], :, :]` for every
-         non-30 channel pair. I.e., the kernel for channel i is *shared*
-         with the kernel for its sigma_c-paired partner (e.g. our pawns
-         (channel 0) and opp pawns (channel 6) use the same kernel).
-
-    Implementation: parameterize a free weight tensor of shape
-    `(out_C, NUM_REPS, k, k)` where `NUM_REPS = 19` is the number of
-    sigma_c orbits on {0..33} \\ {30}. At forward time, expand to a full
-    `(out_C * |G|, 34, k, k)` Conv2d kernel by indexing this free
-    parameter via the per-input-channel orbit map and zeroing out plane
-    30. Then apply the standard LiftingConv "spatial-flip per group
-    element" structure on top.
-
-    This is mathematically equivalent to a constrained 34-channel kernel,
-    but uses ~half the parameters (19 vs 34 effective groups).
-    """
-
-    @staticmethod
-    def _build_orbit_map() -> "torch.Tensor":
-        """For each input channel 0..33, return the orbit-rep index in
-        EQUIV_REPS (or -1 for plane 30 which is constrained to zero)."""
-        # Lazy import to avoid pulling symmetry.actions into the gcnn
-        # primitives module at top-level (keeps the module load order clean).
-        from symmetry.actions import SIGMA_C_CHANNEL_PERM
-
-        # Each sigma_c-orbit's representative is the smaller index in the
-        # pair (or the singleton itself for fixed-point channels).
-        equiv_reps: List[int] = []
-        for c in range(34):
-            if c == 30:
-                continue  # zero-kernel; not represented
-            partner = SIGMA_C_CHANNEL_PERM[c]
-            rep = min(c, partner)
-            if rep == c:  # canonical rep = smaller index
-                equiv_reps.append(rep)
-        # Build a fixed lookup: chan_to_rep[c] = index of c's rep in
-        # equiv_reps, or -1 for plane 30.
-        rep_idx = {rep: i for i, rep in enumerate(equiv_reps)}
-        chan_to_rep_idx = torch.full((34,), -1, dtype=torch.long)
-        for c in range(34):
-            if c == 30:
-                continue
-            partner = SIGMA_C_CHANNEL_PERM[c]
-            rep = min(c, partner)
-            chan_to_rep_idx[c] = rep_idx[rep]
-        return chan_to_rep_idx
-
-    def __init__(
-        self,
-        out_channels: int,
-        kernel_size: int,
-        padding: int = 0,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.padding = padding
-
-        chan_to_rep_idx = self._build_orbit_map()
-        self.register_buffer("chan_to_rep_idx", chan_to_rep_idx, persistent=False)
-        self.num_reps = int(chan_to_rep_idx.max()) + 1  # excludes -1
-        # 19 reps for the standard 34-plane chess input.
-        assert self.num_reps == 19, (
-            f"unexpected sigma_c orbit count: {self.num_reps} (expected 19)"
-        )
-
-        self.weight = nn.Parameter(
-            torch.empty(out_channels, self.num_reps, kernel_size, kernel_size)
-        )
-        nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(out_channels))
-        else:
-            self.register_parameter("bias", None)
-
-    def _build_kernel(self) -> torch.Tensor:
-        """Expand to a full (out_C * |G|, 34, k, k) Conv2d kernel."""
-        # Step 1: expand (out_C, num_reps, k, k) to (out_C, 34, k, k) by
-        # indexing per input channel. Plane 30 (idx=-1) is masked to zero.
-        idx = self.chan_to_rep_idx                               # (34,)
-        mask = (idx >= 0).to(self.weight.dtype).view(1, 34, 1, 1)
-        safe_idx = idx.clamp(min=0)
-        expanded = self.weight.index_select(dim=1, index=safe_idx)  # (out_C, 34, k, k)
-        expanded = expanded * mask
-        # Step 2: stack the |G| spatially-flipped copies in c-major folding.
-        slices: List[torch.Tensor] = [
-            _spatial_g(g, expanded) for g in range(GROUP_SIZE)
-        ]
-        stacked = torch.stack(slices, dim=1)                     # (out_C, |G|, 34, k, k)
-        return stacked.reshape(
-            self.out_channels * GROUP_SIZE,
-            34,
-            self.kernel_size,
-            self.kernel_size,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[1] != 34:
-            raise ValueError(
-                f"ChessLiftingConv expects 34 input channels, got {x.shape[1]}"
-            )
-        kernel = self._build_kernel()
-        bias = (
-            self.bias.repeat_interleave(GROUP_SIZE)
-            if self.bias is not None
-            else None
-        )
         return F.conv2d(x, kernel, bias, padding=self.padding)
 
 
@@ -548,18 +490,12 @@ class GCNNBody(nn.Module):
 
     def __init__(self, blocks: int, filters: int, se_channels: int):
         super().__init__()
-        # ChessLiftingConv (not the generic LiftingConv) is required here:
-        # the chess input action under sigma_c includes a non-trivial
-        # channel permutation (us<->opp swap, castling swap) and a
-        # plane-30 negation, which a pure-spatial LiftingConv does not
-        # respect. ChessLiftingConv constrains its weights to make the
-        # input layer equivariant under the FULL chess sigma_c action.
-        # See ChessLiftingConv docstring for the constraint derivation.
-        
-        #(TODO) Lifting Conv versus ChessLiftingConv
+        # LiftingConv is chess-specific: it builds the 4 output group
+        # slices from a single base kernel by applying each g's FULL
+        # chess input action (spatial flip + sigma_c channel perm +
+        # plane-30 sign flip) to the kernel. See LiftingConv's docstring
+        # for the construction and equivariance derivation.
         self.input_conv = LiftingConv(34, filters, kernel_size=3, padding=1, bias=True)
-        #self.input_conv = ChessLiftingConv(filters, 3, padding=1, bias=True)
-        
         self.input_bn = GBatchNorm(filters)
         self.blocks = nn.ModuleList(
             [GResBlock(filters, se_channels) for _ in range(blocks)]
@@ -623,7 +559,6 @@ __all__ = [
     "regular_rep_perm",
     "group_action_g_signal",
     "LiftingConv",
-    "ChessLiftingConv",
     "GConv",
     "GLinear",
     "GBatchNorm",
