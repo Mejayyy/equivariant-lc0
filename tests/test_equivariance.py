@@ -10,13 +10,24 @@ three heads — i.e. the model is equivariant by construction at random
 init. Phase 11/12 will re-run the same metric AFTER training to verify
 equivariance is preserved by SGD (it should be, given GBatchNorm shares
 stats across the group fiber).
+
+Also covers the SGChess-equivariant variant (``GCNNChess(group=
+SGCHESS_GROUP)``): the same model architecture parameterized by the
+SG_chess subgroup. Equivariance is required ONLY under sigma_c (the
+only non-identity element of SG_chess); sigma_h and sigma_hc are
+allowed to be non-equivariant (and indeed are, since the body has
+just 2 group fibers).
 """
 
 import pytest
 import torch
 
-from metrics.equivariance import equivariance_error, sample_chess_input
-from models import GCNNChess
+from metrics.equivariance import (
+    equivariance_error,
+    equivariance_error_sgchess,
+    sample_chess_input,
+)
+from models import GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
 
 
 EQUIV_TOL = 1e-5
@@ -118,3 +129,117 @@ def test_equivariance_error_returns_expected_keys():
     assert set(errors.keys()) == {"sigma_h", "sigma_c", "sigma_h_c", "overall_mean"}
     for v in errors.values():
         assert isinstance(v, float)
+
+
+# ---------------------------------------------------------------------------
+# SG_chess subgroup: end-to-end equivariance under sigma_c only
+# ---------------------------------------------------------------------------
+
+
+def test_sgcnn_chess_forward_shapes():
+    """SGChess-parameterized GCNNChess has the same forward interface
+    (B, 34, 8, 8) -> (policy, value, mlh) of shapes (B, 1858), (B, 3),
+    (B, 1). Body activations have |G|=2 fibers instead of 4 internally."""
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    x = torch.randn(2, 34, 8, 8)
+    p, v, m = model(x)
+    assert p.shape == (2, 1858)
+    assert v.shape == (2, 3)
+    assert m.shape == (2, 1)
+
+
+def test_sgcnn_chess_value_is_softmax():
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    model.eval()
+    x = sample_chess_input(batch_size=4)
+    with torch.no_grad():
+        _, v, _ = model(x)
+    assert torch.allclose(v.sum(dim=1), torch.ones(4), atol=1e-5)
+    assert (v >= 0).all()
+
+
+def test_sgcnn_chess_mlh_nonneg():
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    model.eval()
+    x = sample_chess_input(batch_size=4)
+    with torch.no_grad():
+        _, _, m = model(x)
+    assert (m >= 0).all()
+
+
+def test_sgcnn_chess_equivariance_error_below_threshold():
+    """SGChess DOD: sigma_c equivariance error < 1e-5 at random init."""
+    torch.manual_seed(0)
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    errors = equivariance_error_sgchess(model, n_samples=8, device="cpu")
+    assert errors["sigma_c"] < EQUIV_TOL, (
+        f"SGChess sigma_c equivariance error {errors['sigma_c']:.3e} >= "
+        f"{EQUIV_TOL:.0e}"
+    )
+    assert errors["overall_mean"] < EQUIV_TOL
+
+
+def test_equivariance_error_sgchess_returns_expected_keys():
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    errors = equivariance_error_sgchess(model, n_samples=2)
+    assert set(errors.keys()) == {"sigma_c", "overall_mean"}
+    for v in errors.values():
+        assert isinstance(v, float)
+
+
+def test_sgcnn_chess_has_fewer_params_than_gcnn_chess():
+    """At matched (blocks, filters), SGChess GCNNChess has fewer
+    parameters than the full GChess GCNNChess — the body's GConv
+    base-kernel count drops from |G|=4 to |G|=2, roughly halving body
+    weights."""
+    kwargs = dict(blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64)
+    gcnn = GCNNChess(**kwargs, group=GCHESS_GROUP)
+    sgcnn = GCNNChess(**kwargs, group=SGCHESS_GROUP)
+    n_g = sum(p.numel() for p in gcnn.parameters())
+    n_s = sum(p.numel() for p in sgcnn.parameters())
+    assert n_s < n_g, (
+        f"SGChess GCNNChess should have fewer params; got "
+        f"sgcnn={n_s} >= gcnn={n_g}"
+    )
+
+
+def test_sgcnn_chess_not_equivariant_under_sigma_h():
+    """Confirms the model is truly an SGChess (Z/2)-equivariant model,
+    not a full G_chess one. Equivariance error under sigma_h should be
+    appreciable (>> 1e-5)."""
+    torch.manual_seed(0)
+    model = GCNNChess(
+        blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,
+        group=SGCHESS_GROUP,
+    )
+    # Reuse the GChess error computation: it tests sigma_h, sigma_c, sigma_hc.
+    errors = equivariance_error(model, n_samples=4, device="cpu")
+    # sigma_c must still be tiny (SGChess guarantees it).
+    assert errors["sigma_c"] < EQUIV_TOL, (
+        f"SGChess model unexpectedly not sigma_c-equivariant: "
+        f"{errors['sigma_c']:.3e}"
+    )
+    # sigma_h and sigma_hc should be substantially non-zero.
+    assert errors["sigma_h"] > 1e-3, (
+        f"SGChess model looks accidentally sigma_h-equivariant: "
+        f"{errors['sigma_h']:.3e}"
+    )
+    assert errors["sigma_h_c"] > 1e-3, (
+        f"SGChess model looks accidentally sigma_hc-equivariant: "
+        f"{errors['sigma_h_c']:.3e}"
+    )

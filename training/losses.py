@@ -95,7 +95,7 @@ def mlh_l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (pred - target).abs().mean()
 
 
-DEFAULT_WEIGHTS = {"policy": 1.0, "value": 1.0, "mlh": 0.05}
+DEFAULT_WEIGHTS = {"policy": 1.0, "value": 1.0, "mlh": 0.01}
 
 
 def combined_loss(

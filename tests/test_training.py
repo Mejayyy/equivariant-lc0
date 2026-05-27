@@ -4,8 +4,9 @@ DOD (CLAUDE.md):
 > One training batch runs on each of the three models without NaN;
 > checkpoint save/load round-trip preserves outputs
 
-We only have BaselineLCZero and GCNNChess (Phase 9 SeparableGCNNChess
-is skipped per user direction), so the DOD is checked on those two.
+We currently have BaselineLCZero, GChess-equivariant GCNNChess, and
+SGChess-equivariant GCNNChess (Phase 9 SeparableGCNNChess is skipped),
+so the DOD is checked on those three.
 """
 
 import math
@@ -13,6 +14,7 @@ import math
 import pytest
 import torch
 
+from models import GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
 from training.losses import (
     combined_loss,
     mlh_l1_loss,
@@ -20,8 +22,10 @@ from training.losses import (
     value_wdl_loss,
 )
 from training.trainer import (
+    MODEL_NAMES,
     build_model,
     load_checkpoint,
+    parse_args,
     save_checkpoint,
 )
 
@@ -155,7 +159,41 @@ def _make_random_batch(batch_size: int = 2, seed: int = 0):
     return planes, target
 
 
-@pytest.mark.parametrize("model_name", ["baseline", "gcnn"])
+def test_train_one_step_returns_grad_norm():
+    """``train_one_step`` returns a dict containing ``grad_norm`` (the
+    pre-clip L2 gradient norm) alongside the per-head losses."""
+    from training.trainer import train_one_step
+
+    torch.manual_seed(0)
+    model = build_model("gcnn", blocks=2, filters=16, se_channels=4,
+                        mlh_channels=4, fc_size=16)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    planes, targets = _make_random_batch(batch_size=2)
+    out = train_one_step(
+        model, (planes, targets), torch.device("cpu"), optimizer, grad_clip=5.0,
+    )
+    assert {"total", "policy", "value", "mlh", "grad_norm"}.issubset(out.keys())
+    assert out["grad_norm"] >= 0.0
+    assert math.isfinite(out["grad_norm"])
+
+
+def test_train_one_step_grad_norm_without_clip():
+    """grad_norm is captured even when ``grad_clip`` is disabled (0/None)."""
+    from training.trainer import train_one_step
+
+    torch.manual_seed(0)
+    model = build_model("baseline", blocks=2, filters=16, se_channels=4,
+                        mlh_channels=4, fc_size=16)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    planes, targets = _make_random_batch(batch_size=2)
+    out = train_one_step(
+        model, (planes, targets), torch.device("cpu"), optimizer, grad_clip=0.0,
+    )
+    assert out["grad_norm"] >= 0.0
+    assert math.isfinite(out["grad_norm"])
+
+
+@pytest.mark.parametrize("model_name", ["baseline", "gcnn", "sgcnn"])
 def test_one_training_step_does_not_nan(model_name):
     """Phase 10 DOD #1: a forward+backward+step on the model produces
     finite gradients and finite parameters afterwards."""
@@ -185,7 +223,7 @@ def test_one_training_step_does_not_nan(model_name):
         assert torch.isfinite(p).all(), f"NaN/inf param in {name} after step"
 
 
-@pytest.mark.parametrize("model_name", ["baseline", "gcnn"])
+@pytest.mark.parametrize("model_name", ["baseline", "gcnn", "sgcnn"])
 def test_checkpoint_round_trip_preserves_outputs(tmp_path, model_name):
     """Phase 10 DOD #2: save -> load reproduces the same forward output."""
     torch.manual_seed(0)
@@ -233,6 +271,45 @@ def test_checkpoint_round_trip_preserves_outputs(tmp_path, model_name):
 
 
 def _write_fake_log(path, train_steps=(100, 200, 300), val_steps=(200,)):
+    """Write a synthetic JSONL log matching the trainer's NEW schema:
+    avg + exact per-head losses + grad_norm on train; total/policy/
+    value/mlh on val.
+    """
+    import json as _json
+    with open(path, "w") as f:
+        for s in train_steps:
+            avg_total = 5.0 - s / 100
+            exact_total = avg_total + 0.1
+            f.write(_json.dumps({
+                "step": s, "phase": "train",
+                "total_avg": avg_total,
+                "policy_avg": 3.0 - s / 200,
+                "value_avg": 1.0,
+                "mlh_avg": 100.0 - s / 10,
+                "total_exact": exact_total,
+                "policy_exact": 3.05 - s / 200,
+                "value_exact": 1.02,
+                "mlh_exact": 102.0 - s / 10,
+                "grad_norm": 4.0 - s / 1000,
+                # Back-compat aliases (the trainer writes these too).
+                "loss_avg": avg_total,
+                "policy": 3.0 - s / 200,
+                "value": 1.0,
+                "mlh": 100.0 - s / 10,
+                "samples_per_sec": 50,
+            }) + "\n")
+        for s in val_steps:
+            f.write(_json.dumps({
+                "step": s, "phase": "val",
+                "total": 5.5, "policy": 3.5, "value": 1.2, "mlh": 105.0,
+            }) + "\n")
+        # A summary record the parser should ignore
+        f.write(_json.dumps({"phase": "summary", "total_time_seconds": 1.2}) + "\n")
+
+
+def _write_legacy_log(path, train_steps=(100, 200, 300), val_steps=(200,)):
+    """Write a JSONL log in the PRE-fix schema (no *_avg, no *_exact, no
+    grad_norm) so we can test backward-compat parsing."""
     import json as _json
     with open(path, "w") as f:
         for s in train_steps:
@@ -249,18 +326,25 @@ def _write_fake_log(path, train_steps=(100, 200, 300), val_steps=(200,)):
                 "step": s, "phase": "val",
                 "total": 5.5, "policy": 3.5, "value": 1.2, "mlh": 105.0,
             }) + "\n")
-        # A summary record the parser should ignore
-        f.write(_json.dumps({"phase": "summary", "total_time_seconds": 1.2}) + "\n")
 
 
-def test_plot_run_creates_png(tmp_path):
+def test_plot_run_creates_three_pngs(tmp_path):
+    """plot_run produces loss_curves_avg.png, loss_curves_exact.png, and
+    grad_norm.png; the legacy ``loss_curves.png`` alias is also written
+    for back-compat. The returned path is the avg one (primary)."""
     from training.plot import plot_run
     _write_fake_log(tmp_path / "train_log.jsonl")
     out = plot_run(tmp_path, save=True, show=False)
     assert out is not None
     assert out.exists()
-    assert out.suffix == ".png"
+    assert out.name == "loss_curves_avg.png"
     assert out.stat().st_size > 0
+
+    for name in ("loss_curves_avg.png", "loss_curves_exact.png",
+                 "grad_norm.png", "loss_curves.png"):
+        p = tmp_path / name
+        assert p.exists(), f"missing {name}"
+        assert p.stat().st_size > 0, f"{name} is empty"
 
 
 def test_plot_run_handles_missing_log(tmp_path):
@@ -269,19 +353,111 @@ def test_plot_run_handles_missing_log(tmp_path):
         plot_run(tmp_path)
 
 
-def test_plot_load_log_parses_all_four_heads(tmp_path):
+def test_plot_load_log_parses_new_schema(tmp_path):
+    """``_load_log`` exposes both _avg and _exact per-head series for
+    train, plus a grad_norm series, plus the unchanged val totals."""
     from training.plot import _load_log
 
     log_path = tmp_path / "train_log.jsonl"
     _write_fake_log(log_path)
     data = _load_log(log_path)
+
     assert set(data.keys()) == {"train", "val"}
-    for phase in ("train", "val"):
-        for key in ("step", "total", "policy", "value", "mlh"):
-            assert key in data[phase]
-    # Train: 3 entries; val: 1.
+
+    expected_train_keys = {
+        "step",
+        "total_avg", "policy_avg", "value_avg", "mlh_avg",
+        "total_exact", "policy_exact", "value_exact", "mlh_exact",
+        "grad_norm",
+    }
+    assert expected_train_keys.issubset(data["train"].keys())
+    expected_val_keys = {"step", "total", "policy", "value", "mlh"}
+    assert expected_val_keys.issubset(data["val"].keys())
+
+    # 3 train entries; 1 val.
     assert len(data["train"]["step"]) == 3
     assert len(data["val"]["step"]) == 1
-    # Total comes from "loss_avg" for train and "total" for val.
-    assert data["train"]["total"] == [5.0 - 1.0, 5.0 - 2.0, 5.0 - 3.0]
+    assert data["train"]["total_avg"] == [5.0 - 1.0, 5.0 - 2.0, 5.0 - 3.0]
+    # Exact values are intentionally offset from avg in the fake log
+    # (avg + 0.1), so this also verifies the exact field is read
+    # independently and not mirrored from the avg field.
+    assert data["train"]["total_exact"] == [
+        (5.0 - 1.0) + 0.1, (5.0 - 2.0) + 0.1, (5.0 - 3.0) + 0.1,
+    ]
+    assert data["train"]["grad_norm"] == [4.0 - 0.1, 4.0 - 0.2, 4.0 - 0.3]
     assert data["val"]["total"] == [5.5]
+
+
+def test_plot_load_log_backward_compat_legacy_schema(tmp_path):
+    """A log file written by the OLD trainer (no *_avg / *_exact /
+    grad_norm keys) is still parseable: the old ``loss_avg`` and bare
+    ``policy/value/mlh`` keys are treated as the avg series, and the
+    exact / grad_norm series are NaN-filled. plot_run must still emit
+    all three PNGs without raising."""
+    import math
+    from training.plot import _load_log, plot_run
+
+    log_path = tmp_path / "train_log.jsonl"
+    _write_legacy_log(log_path)
+    data = _load_log(log_path)
+
+    assert len(data["train"]["step"]) == 3
+    # Old "loss_avg" becomes total_avg.
+    assert data["train"]["total_avg"] == [5.0 - 1.0, 5.0 - 2.0, 5.0 - 3.0]
+    # Exact / grad_norm are absent in the legacy log -> NaN entries.
+    for k in ("total_exact", "policy_exact", "value_exact", "mlh_exact",
+              "grad_norm"):
+        assert len(data["train"][k]) == 3
+        assert all(math.isnan(v) for v in data["train"][k]), (
+            f"expected NaN-filled {k} from legacy log, got {data['train'][k]}"
+        )
+
+    # plot_run still works (figures will have gaps for exact / grad_norm).
+    out = plot_run(tmp_path, save=True, show=False)
+    assert out is not None and out.exists()
+    for name in ("loss_curves_avg.png", "loss_curves_exact.png",
+                 "grad_norm.png"):
+        assert (tmp_path / name).exists()
+
+
+# ---------------------------------------------------------------------------
+# Trainer CLI: --model sgcnn wires through to SGCHESS_GROUP
+# ---------------------------------------------------------------------------
+
+
+def test_trainer_model_names_include_sgcnn():
+    assert "sgcnn" in MODEL_NAMES
+    assert set(MODEL_NAMES) == {"baseline", "gcnn", "sgcnn"}
+
+
+def test_trainer_cli_accepts_sgcnn():
+    """``parse_args(['--model', 'sgcnn', ...])`` does not error."""
+    args = parse_args([
+        "--model", "sgcnn",
+        "--blocks", "2", "--filters", "16",
+        "--max-steps", "1", "--device", "cpu",
+        "--output-dir", "runs/_tmp_test",
+    ])
+    assert args.model == "sgcnn"
+
+
+def test_build_model_sgcnn_returns_sgchess_gcnn():
+    """``build_model('sgcnn', ...)`` produces a GCNNChess instance
+    with group=SGCHESS_GROUP."""
+    model = build_model("sgcnn", blocks=2, filters=16, se_channels=4)
+    assert isinstance(model, GCNNChess)
+    assert model.group is SGCHESS_GROUP
+
+
+def test_build_model_gcnn_returns_gchess_gcnn():
+    """``build_model('gcnn', ...)`` produces a GCNNChess with
+    group=GCHESS_GROUP (regression: confirming the explicit group
+    plumbing didn't break the default)."""
+    model = build_model("gcnn", blocks=2, filters=16, se_channels=4)
+    assert isinstance(model, GCNNChess)
+    assert model.group is GCHESS_GROUP
+
+
+def test_build_model_rejects_unknown():
+    with pytest.raises(ValueError):
+        build_model("not_a_real_model", blocks=2, filters=16)

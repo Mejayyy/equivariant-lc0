@@ -1,5 +1,6 @@
 from .baseline import BaselineBody, BaselineLCZero, ResBlock, SELayer
 from .gcnn import (
+    GCHESS_GROUP,
     GROUP_SIZE,
     GBatchNorm,
     GCNNBody,
@@ -8,7 +9,9 @@ from .gcnn import (
     GLinear,
     GResBlock,
     GSELayer,
+    GroupDef,
     LiftingConv,
+    SGCHESS_GROUP,
     group_action_g_signal,
     regular_rep_perm,
 )
@@ -30,6 +33,7 @@ from .policy_map import (
     build_flat_to_policy_index,
     build_orbit_policy_gather,
     build_policy_gather_indices,
+    build_sgchess_orbit_policy_gather,
     move_to_uci,
     square_to_uci,
 )
@@ -47,6 +51,7 @@ __all__ = [
     "build_policy_gather_indices",
     "build_flat_to_policy_index",
     "build_orbit_policy_gather",
+    "build_sgchess_orbit_policy_gather",
     # baseline
     "BaselineLCZero",
     "BaselineBody",
@@ -57,6 +62,9 @@ __all__ = [
     "BaselineMovesLeftHead",
     # gcnn primitives
     "GROUP_SIZE",
+    "GCHESS_GROUP",
+    "SGCHESS_GROUP",
+    "GroupDef",
     "LiftingConv",
     "GConv",
     "GLinear",

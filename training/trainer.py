@@ -1,14 +1,26 @@
-"""Training loop for `BaselineLCZero` and `GCNNChess` on LCZero V6 data.
+"""Training loop for `BaselineLCZero`, `GCNNChess` (GChess-equivariant),
+and `GCNNChess(group=SGCHESS_GROUP)` (SGChess-equivariant) on LCZero V6
+data.
 
 Usage (CLI)::
 
     python -m training.trainer \\
-        --model {baseline,gcnn} \\
+        --model {baseline,gcnn,sgcnn} \\
         --blocks 10 --filters 128 \\
         --batch-size 256 --lr 1e-3 \\
         --max-steps 10000 \\
         --device cuda \\
         --output-dir runs/my_run
+
+Model variants:
+
+- ``baseline`` — ``BaselineLCZero`` (no equivariance; faithful LCZero
+  SE-residual re-implementation).
+- ``gcnn``     — ``GCNNChess(group=GCHESS_GROUP)``: full G_chess =
+  {e, sigma_h, sigma_c, sigma_hc} equivariance. |G| = 4.
+- ``sgcnn``    — ``GCNNChess(group=SGCHESS_GROUP)``: SG_chess =
+  {e, sigma_c} subgroup equivariance only. |G| = 2; about half the
+  body parameters of ``gcnn`` at matched (blocks, filters).
 
 Reads `DATA_SPLITS` from `data/config.py` for train / val folder lists.
 Writes checkpoints (``ckpt_<step>.pt``) and a JSON-Lines metrics log
@@ -36,9 +48,12 @@ from torch.utils.data import DataLoader
 
 from data.config import DATA_SPLITS
 from data.dataset import LCZeroV6Dataset
-from models import BaselineLCZero, GCNNChess
+from models import BaselineLCZero, GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
 
 from .losses import combined_loss
+
+
+MODEL_NAMES = ("baseline", "gcnn", "sgcnn")
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +69,8 @@ def build_model(
     mlh_channels: int = 8,
     fc_size: int = 128,
 ) -> nn.Module:
+    """Build one of: ``baseline``, ``gcnn`` (full G_chess), ``sgcnn``
+    (SG_chess subgroup, sigma_c only)."""
     if name == "baseline":
         return BaselineLCZero(
             blocks=blocks,
@@ -69,8 +86,20 @@ def build_model(
             se_channels=se_channels,
             mlh_channels=mlh_channels,
             fc_size=fc_size,
+            group=GCHESS_GROUP,
         )
-    raise ValueError(f"unknown model: {name}; expected 'baseline' or 'gcnn'")
+    if name == "sgcnn":
+        return GCNNChess(
+            blocks=blocks,
+            filters=filters,
+            se_channels=se_channels,
+            mlh_channels=mlh_channels,
+            fc_size=fc_size,
+            group=SGCHESS_GROUP,
+        )
+    raise ValueError(
+        f"unknown model: {name}; expected one of {MODEL_NAMES}"
+    )
 
 
 def make_loaders(
@@ -111,6 +140,21 @@ def _to_device(planes, targets, device, non_blocking):
     return planes, targets
 
 
+def _total_grad_norm(parameters, norm_type: float = 2.0) -> float:
+    """L2 norm of the gradients across ``parameters`` (PRE-clip), as a
+    plain Python float. Mirrors what ``torch.nn.utils.clip_grad_norm_``
+    returns internally but works when grad-clip is disabled."""
+    grads = [p.grad for p in parameters if p.grad is not None]
+    if not grads:
+        return 0.0
+    device = grads[0].device
+    total = torch.norm(
+        torch.stack([torch.norm(g.detach(), norm_type).to(device) for g in grads]),
+        norm_type,
+    )
+    return float(total.item())
+
+
 def train_one_step(
     model: nn.Module,
     batch,
@@ -118,7 +162,9 @@ def train_one_step(
     optimizer: torch.optim.Optimizer,
     grad_clip: Optional[float] = None,
 ) -> Dict[str, float]:
-    """Forward + backward + step. Returns scalar losses."""
+    """Forward + backward + step. Returns scalar losses AND the L2
+    gradient norm captured PRE-clip (so the logged value reflects the
+    raw gradient magnitude, not what the optimizer actually saw)."""
     model.train()
     planes, targets = _to_device(*batch, device, non_blocking=True)
     out = model(planes)
@@ -126,9 +172,15 @@ def train_one_step(
     optimizer.zero_grad(set_to_none=True)
     losses["total"].backward()
     if grad_clip is not None and grad_clip > 0:
-        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # clip_grad_norm_ returns the pre-clip total norm as a Tensor.
+        gn = nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        grad_norm = float(gn.item() if isinstance(gn, torch.Tensor) else gn)
+    else:
+        grad_norm = _total_grad_norm(model.parameters())
     optimizer.step()
-    return {k: v.item() for k, v in losses.items()}
+    out = {k: v.item() for k, v in losses.items()}
+    out["grad_norm"] = grad_norm
+    return out
 
 
 @torch.no_grad()
@@ -284,35 +336,71 @@ def train(args: argparse.Namespace) -> None:
     )
     t0 = time.time()
     train_iter = iter(train_loader)
-    train_window = []
+    # Window stores per-head losses + total over the last `log_every`
+    # steps; we log both windowed means (`*_avg`) and the SINGLE
+    # last-step values (`*_exact`) at each log_every checkpoint. Grad
+    # norm is captured per-step and logged for the last step only.
+    train_window = {"total": [], "policy": [], "value": [], "mlh": []}
 
     for step in range(start_step + 1, args.max_steps + 1):
         batch, train_iter = _next_batch(train_iter, train_loader)
         losses = train_one_step(
             model, batch, device, optimizer, grad_clip=args.grad_clip
         )
-        train_window.append(losses["total"])
+        for k in train_window:
+            train_window[k].append(losses[k])
 
         if step % args.log_every == 0:
-            window = train_window[-args.log_every:]
-            avg = sum(window) / len(window)
+            window_means = {
+                k: sum(v[-args.log_every:]) / min(len(v), args.log_every)
+                for k, v in train_window.items()
+            }
             elapsed = time.time() - t0
             samples = (step - start_step) * args.batch_size
             sps = samples / max(elapsed, 1e-6)
+            grad_norm = losses["grad_norm"]
             print(
-                f"[{step:>6d}/{args.max_steps}] train_loss={avg:.4f}  "
-                f"p={losses['policy']:.3f} v={losses['value']:.3f} "
-                f"m={losses['mlh']:.3f}  ({sps:.0f} samples/sec)"
+                f"[{step:>6d}/{args.max_steps}] "
+                f"avg  L={window_means['total']:.4f}  "
+                f"p={window_means['policy']:.3f} "
+                f"v={window_means['value']:.3f} "
+                f"m={window_means['mlh']:.3f}  "
+                f"({sps:.0f} samples/sec)"
+            )
+            print(
+                f"                  step L={losses['total']:.4f}  "
+                f"p={losses['policy']:.3f} "
+                f"v={losses['value']:.3f} "
+                f"m={losses['mlh']:.3f}  "
+                f"|grad|={grad_norm:.3f}"
             )
             log_file.write(
                 json.dumps(
                     {
                         "step": step,
                         "phase": "train",
-                        "loss_avg": avg,
-                        "policy": losses["policy"],
-                        "value": losses["value"],
-                        "mlh": losses["mlh"],
+                        # Windowed means over the last log_every steps.
+                        "total_avg": window_means["total"],
+                        "policy_avg": window_means["policy"],
+                        "value_avg": window_means["value"],
+                        "mlh_avg": window_means["mlh"],
+                        # Single last-step values.
+                        "total_exact": losses["total"],
+                        "policy_exact": losses["policy"],
+                        "value_exact": losses["value"],
+                        "mlh_exact": losses["mlh"],
+                        # Last-step L2 gradient norm (pre-clip).
+                        "grad_norm": grad_norm,
+                        # Back-compat alias: older plot scripts read
+                        # "loss_avg" / "policy" / "value" / "mlh" as
+                        # the windowed mean. We keep them populated so
+                        # downstream scripts (and old runs) continue
+                        # to work; new code should prefer the *_avg /
+                        # *_exact split above.
+                        "loss_avg": window_means["total"],
+                        "policy": window_means["policy"],
+                        "value": window_means["value"],
+                        "mlh": window_means["mlh"],
                         "samples_per_sec": sps,
                     }
                 )
@@ -377,9 +465,12 @@ def train(args: argparse.Namespace) -> None:
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train BaselineLCZero or GCNNChess on LCZero V6 data."
+        description=(
+            "Train BaselineLCZero, GChess-equivariant GCNNChess, or "
+            "SGChess-equivariant GCNNChess on LCZero V6 data."
+        )
     )
-    p.add_argument("--model", choices=["baseline", "gcnn"], required=True)
+    p.add_argument("--model", choices=list(MODEL_NAMES), required=True)
     p.add_argument("--blocks", type=int, default=10)
     p.add_argument("--filters", type=int, default=128)
     p.add_argument("--se-channels", type=int, default=32)
@@ -420,3 +511,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python -m training.trainer `
+    --model baseline `
+    --blocks 5 `
+    --filters 128 `
+    --se-channels 32 `
+    --mlh-channels 8 `
+    --fc-size 128 `
+    --batch-size 512 `
+    --lr 5e-4 `
+    --weight-decay 5e-4 `
+    --max-steps 10000 `
+    --log-every 500 `
+    --val-every 500 `
+    --val-batches 500 `
+    --checkpoint-every 10000 `
+    --num-workers 0 `
+    --device cuda `
+    --seed 0 `
+    --output-dir runs/1_cuda_baseline
+"""

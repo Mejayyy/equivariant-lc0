@@ -8,23 +8,30 @@ Equivariance is checked AT INIT (no training). With Kaiming-init kernels
 and default BN running stats, every primitive in this file is equivariant
 by construction; the test asserts this against the regular-representation
 group action on G-signals.
+
+Each primitive is tested twice: once with the default ``GCHESS_GROUP``
+(|G|=4), and once with ``SGCHESS_GROUP`` (|G|=2, only sigma_c). The
+SGChess case exercises the same construction with a different group
+descriptor — same primitives, fewer fibers, still strictly equivariant.
 """
 
 import pytest
 import torch
 
 from models.gcnn import (
+    GCHESS_GROUP,
     GROUP_SIZE,
     GBatchNorm,
     GConv,
     GLinear,
     GSELayer,
     LiftingConv,
+    SGCHESS_GROUP,
     group_action_g_signal,
     regular_rep_perm,
 )
 from symmetry.actions import group_action_input
-from symmetry.group import COMPOSITION_TABLE, ELEMENTS, GChess
+from symmetry.group import COMPOSITION_TABLE, ELEMENTS, GChess, SGChess
 
 
 # ---------------------------------------------------------------------------
@@ -447,3 +454,326 @@ def test_mini_pipeline_equivariance(g):
 
     diff = (out_gx - g_out_x).abs().max().item()
     assert diff < 1e-5, f"mini-pipeline equivariance failed for {g.name}: max diff = {diff}"
+
+
+# ===========================================================================
+# SG_chess subgroup ({e, sigma_c}, |G|=2): parallel tests
+# ===========================================================================
+#
+# Each primitive is rebuilt with ``group=SGCHESS_GROUP`` and tested for
+# strict equivariance under the single non-identity element sigma_c
+# (which has local index 1 in the SGChess enumeration). Shape tests use
+# |G|=2 instead of GROUP_SIZE.
+
+
+SGCHESS_ORDER = 2  # for shape arithmetic; mirrors symmetry/group.SGCHESS_ORDER
+
+
+# ---------------------------------------------------------------------------
+# regular_rep_perm + group_action_g_signal (SGChess)
+# ---------------------------------------------------------------------------
+
+
+def test_regular_rep_perm_sgchess_identity():
+    perm = regular_rep_perm(SGChess.E, num_logical_channels=3, group=SGCHESS_GROUP)
+    assert torch.equal(perm, torch.arange(3 * SGCHESS_ORDER, dtype=torch.long))
+
+
+def test_regular_rep_perm_sgchess_sigma_c_swaps_fibers():
+    """SGChess sigma_c (local index 1) swaps the 2 fibers of each logical channel."""
+    C = 3
+    perm = regular_rep_perm(SGChess.SIGMA_C, num_logical_channels=C, group=SGCHESS_GROUP)
+    expected = torch.empty(C * SGCHESS_ORDER, dtype=torch.long)
+    for c in range(C):
+        expected[c * 2 + 0] = c * 2 + 1
+        expected[c * 2 + 1] = c * 2 + 0
+    assert torch.equal(perm, expected)
+
+
+def test_regular_rep_perm_sgchess_sigma_c_self_inverse():
+    perm = regular_rep_perm(SGChess.SIGMA_C, num_logical_channels=2, group=SGCHESS_GROUP)
+    assert torch.equal(perm[perm], torch.arange(2 * SGCHESS_ORDER, dtype=torch.long))
+
+
+def test_group_action_g_signal_sgchess_self_inverse():
+    x = torch.randn(2, 3 * SGCHESS_ORDER, 8, 8)
+    twice = group_action_g_signal(
+        SGChess.SIGMA_C,
+        group_action_g_signal(SGChess.SIGMA_C, x, 3, group=SGCHESS_GROUP),
+        3,
+        group=SGCHESS_GROUP,
+    )
+    assert torch.equal(twice, x)
+
+
+# ---------------------------------------------------------------------------
+# LiftingConv (SGChess)
+# ---------------------------------------------------------------------------
+
+
+def test_lifting_conv_sgchess_shape():
+    """SGChess LiftingConv outputs |G|=2 fibers per logical channel."""
+    layer = LiftingConv(
+        in_channels=34, out_channels=4, kernel_size=3, padding=1, group=SGCHESS_GROUP
+    )
+    x = torch.randn(2, 34, 8, 8)
+    y = layer(x)
+    assert y.shape == (2, 4 * SGCHESS_ORDER, 8, 8)
+
+
+def test_lifting_conv_sgchess_parameter_count():
+    """SGChess LiftingConv learns the same base kernel as GChess
+    LiftingConv: one (C_out, 34, k, k) kernel + (C_out,) bias. The fiber
+    count is a function of forward-time kernel construction, not of
+    learned parameters."""
+    layer = LiftingConv(
+        in_channels=34, out_channels=7, kernel_size=3, padding=1, bias=True,
+        group=SGCHESS_GROUP,
+    )
+    actual = sum(p.numel() for p in layer.parameters())
+    expected = 7 * 34 * 3 * 3 + 7
+    assert actual == expected
+
+
+def test_lifting_conv_sgchess_equivariance():
+    """LiftingConv with group=SGCHESS_GROUP must be strictly equivariant
+    under the FULL chess input action of sigma_c."""
+    for sample in range(3):
+        torch.manual_seed(2026 + sample)
+        layer = LiftingConv(
+            in_channels=34, out_channels=4, kernel_size=3, padding=1,
+            group=SGCHESS_GROUP,
+        )
+        layer.eval()
+
+        x = _sample_chess_input(seed=sample)
+        gx = group_action_input(GChess.SIGMA_C, x)
+
+        with torch.no_grad():
+            out_x = layer(x)
+            out_gx = layer(gx)
+            g_out_x = group_action_g_signal(
+                SGChess.SIGMA_C, out_x, num_logical_channels=4, group=SGCHESS_GROUP,
+            )
+
+        diff = (out_gx - g_out_x).abs().max().item()
+        assert diff < 1e-5, f"SGChess LiftingConv sample={sample}: max diff = {diff}"
+
+
+def test_lifting_conv_sgchess_not_equivariant_under_sigma_h():
+    """Sanity check: SGChess LiftingConv is NOT designed to be equivariant
+    under sigma_h (file flip), only under sigma_c. The forward output
+    under sigma_h-transformed input does NOT match the natural action on
+    the SGChess-fiber output — confirming we built the right subgroup
+    and didn't accidentally inherit full-group equivariance."""
+    torch.manual_seed(0)
+    layer = LiftingConv(
+        in_channels=34, out_channels=4, kernel_size=3, padding=1, group=SGCHESS_GROUP,
+    )
+    layer.eval()
+    x = _sample_chess_input(seed=0)
+    gx = group_action_input(GChess.SIGMA_H, x)
+
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        # The "natural" output action of sigma_h on a SGChess G-signal
+        # is just the spatial file flip (since SGChess has no sigma_h
+        # in its regular rep — sigma_h is not even a group element).
+        out_x_flipped = torch.flip(out_x, dims=[-1])
+
+    diff = (out_gx - out_x_flipped).abs().max().item()
+    # On a non-trivial random init, the discrepancy should be O(1).
+    # Treat anything > 1e-3 as "definitely not equivariant under sigma_h".
+    assert diff > 1e-3, (
+        f"SGChess LiftingConv unexpectedly looks sigma_h-equivariant: "
+        f"max diff = {diff}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# GConv (SGChess)
+# ---------------------------------------------------------------------------
+
+
+def test_gconv_sgchess_shape():
+    layer = GConv(in_channels=4, out_channels=6, kernel_size=3, padding=1, group=SGCHESS_GROUP)
+    x = torch.randn(2, 4 * SGCHESS_ORDER, 8, 8)
+    y = layer(x)
+    assert y.shape == (2, 6 * SGCHESS_ORDER, 8, 8)
+
+
+def test_gconv_sgchess_parameter_count_is_half_of_gchess():
+    """SGChess uses |G|=2 base kernels; GChess uses |G|=4. With matched
+    (C_in, C_out, k), SGChess GConv has 2/4 = half the weight params."""
+    layer_g = GConv(in_channels=4, out_channels=6, kernel_size=3, padding=1)
+    layer_s = GConv(
+        in_channels=4, out_channels=6, kernel_size=3, padding=1, group=SGCHESS_GROUP,
+    )
+    n_g = layer_g.weight.numel()
+    n_s = layer_s.weight.numel()
+    assert n_s * 2 == n_g, f"expected SGChess GConv to have half the params; got {n_s} vs {n_g}"
+
+
+def test_gconv_sgchess_equivariance():
+    """GConv with group=SGCHESS_GROUP must be strictly equivariant under
+    sigma_c (the only non-identity element of SGChess)."""
+    for sample in range(3):
+        torch.manual_seed(100 + sample)
+        layer = GConv(
+            in_channels=4, out_channels=6, kernel_size=3, padding=1, group=SGCHESS_GROUP,
+        )
+        layer.eval()
+
+        x = torch.randn(2, 4 * SGCHESS_ORDER, 8, 8)
+        gx = group_action_g_signal(
+            SGChess.SIGMA_C, x, num_logical_channels=4, group=SGCHESS_GROUP,
+        )
+
+        with torch.no_grad():
+            out_x = layer(x)
+            out_gx = layer(gx)
+            g_out_x = group_action_g_signal(
+                SGChess.SIGMA_C, out_x, num_logical_channels=6, group=SGCHESS_GROUP,
+            )
+
+        diff = (out_gx - g_out_x).abs().max().item()
+        assert diff < 1e-5, f"SGChess GConv sample={sample}: max diff = {diff}"
+
+
+# ---------------------------------------------------------------------------
+# GLinear / GBatchNorm / GSELayer (SGChess)
+# ---------------------------------------------------------------------------
+
+
+def test_glinear_sgchess_shape_and_equivariance():
+    torch.manual_seed(0)
+    layer = GLinear(in_channels=4, out_channels=6, group=SGCHESS_GROUP)
+    layer.eval()
+
+    x = torch.randn(2, 4 * SGCHESS_ORDER)
+    in_perm = regular_rep_perm(SGChess.SIGMA_C, 4, group=SGCHESS_GROUP)
+    out_perm = regular_rep_perm(SGChess.SIGMA_C, 6, group=SGCHESS_GROUP)
+    gx = x.index_select(dim=1, index=in_perm)
+
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = out_x.index_select(dim=1, index=out_perm)
+
+    assert out_x.shape == (2, 6 * SGCHESS_ORDER)
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, f"SGChess GLinear sigma_c: max diff = {diff}"
+
+
+def test_gbatchnorm_sgchess_shape_and_equivariance():
+    layer = GBatchNorm(num_logical_channels=4, group=SGCHESS_GROUP)
+    layer.eval()
+    x = torch.randn(2, 4 * SGCHESS_ORDER, 8, 8)
+    gx = group_action_g_signal(
+        SGChess.SIGMA_C, x, num_logical_channels=4, group=SGCHESS_GROUP,
+    )
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = group_action_g_signal(
+            SGChess.SIGMA_C, out_x, num_logical_channels=4, group=SGCHESS_GROUP,
+        )
+    assert out_x.shape == x.shape
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, f"SGChess GBatchNorm sigma_c: max diff = {diff}"
+
+
+def test_gbatchnorm_sgchess_equivariance_after_training():
+    """Like the GChess version: after SGD steps the BN running stats
+    are non-trivial; equivariance must still hold because stats are
+    shared across the |G|=2 fibers."""
+    torch.manual_seed(1)
+    layer = GBatchNorm(num_logical_channels=4, group=SGCHESS_GROUP)
+    opt = torch.optim.SGD(layer.parameters(), lr=1e-2)
+
+    layer.train()
+    for _ in range(5):
+        x_train = torch.randn(4, 4 * SGCHESS_ORDER, 8, 8)
+        out = layer(x_train)
+        loss = out.pow(2).mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    layer.eval()
+    x = torch.randn(2, 4 * SGCHESS_ORDER, 8, 8)
+    gx = group_action_g_signal(
+        SGChess.SIGMA_C, x, num_logical_channels=4, group=SGCHESS_GROUP,
+    )
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = group_action_g_signal(
+            SGChess.SIGMA_C, out_x, num_logical_channels=4, group=SGCHESS_GROUP,
+        )
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, (
+        f"SGChess GBatchNorm equivariance broke after training: max diff = {diff}"
+    )
+
+
+def test_gse_layer_sgchess_shape_and_equivariance():
+    torch.manual_seed(0)
+    layer = GSELayer(channels=4, se_channels=2, group=SGCHESS_GROUP)
+    layer.eval()
+    x = torch.randn(2, 4 * SGCHESS_ORDER, 8, 8)
+    gx = group_action_g_signal(
+        SGChess.SIGMA_C, x, num_logical_channels=4, group=SGCHESS_GROUP,
+    )
+    with torch.no_grad():
+        out_x = layer(x)
+        out_gx = layer(gx)
+        g_out_x = group_action_g_signal(
+            SGChess.SIGMA_C, out_x, num_logical_channels=4, group=SGCHESS_GROUP,
+        )
+    assert out_x.shape == x.shape
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, f"SGChess GSELayer sigma_c: max diff = {diff}"
+
+
+# ---------------------------------------------------------------------------
+# Mini-pipeline (SGChess)
+# ---------------------------------------------------------------------------
+
+
+def test_mini_pipeline_sgchess_equivariance():
+    """LiftingConv -> GBatchNorm -> ReLU -> GConv (all with
+    group=SGCHESS_GROUP) is strictly equivariant under sigma_c."""
+    torch.manual_seed(0)
+    lift = LiftingConv(
+        in_channels=34, out_channels=5, kernel_size=3, padding=1, group=SGCHESS_GROUP,
+    )
+    bn = GBatchNorm(num_logical_channels=5, group=SGCHESS_GROUP)
+    gconv = GConv(
+        in_channels=5, out_channels=4, kernel_size=3, padding=1, group=SGCHESS_GROUP,
+    )
+
+    lift.eval(); bn.eval(); gconv.eval()
+
+    def fwd(z):
+        z = lift(z)
+        z = bn(z)
+        z = torch.nn.functional.relu(z)
+        z = gconv(z)
+        return z
+
+    x = _sample_chess_input(batch=2, seed=0)
+    gx = group_action_input(GChess.SIGMA_C, x)
+
+    with torch.no_grad():
+        out_x = fwd(x)
+        out_gx = fwd(gx)
+        g_out_x = group_action_g_signal(
+            SGChess.SIGMA_C, out_x, num_logical_channels=4, group=SGCHESS_GROUP,
+        )
+
+    diff = (out_gx - g_out_x).abs().max().item()
+    assert diff < 1e-5, (
+        f"SGChess mini-pipeline sigma_c equivariance failed: max diff = {diff}"
+    )

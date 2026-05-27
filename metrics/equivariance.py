@@ -1,23 +1,31 @@
-"""Equivariance error metric for evaluating G_chess-equivariant models.
+"""Equivariance error metric for evaluating G_chess- (and SG_chess-)
+equivariant models.
 
-For a 3-headed model `model(x) -> (policy, value, mlh)`, computes the
-relative-Frobenius deviation between f(g . x) and g . f(x) per head,
-averaged across heads and samples, for each non-identity g in G_chess.
+For a 3-headed model ``model(x) -> (policy, value, mlh)``, computes the
+relative-Frobenius deviation between ``f(g . x)`` and ``g . f(x)`` per
+head, averaged across heads and samples, for each non-identity g in
+the chosen group.
 
-API matches CLAUDE.md "Equivariance Error Metric":
+Two APIs:
 
     equivariance_error(model, n_samples=64, device='cpu') -> {
-        "sigma_h":      <mean relative Frobenius error>,
-        "sigma_c":      <mean relative Frobenius error>,
-        "sigma_h_c":    <mean relative Frobenius error>,
-        "overall_mean": <mean across non-identity elements>,
+        "sigma_h": ..., "sigma_c": ..., "sigma_h_c": ..., "overall_mean": ...,
     }
 
-Runs in `model.eval()` + `torch.no_grad()`. For Models 2 and 3, every
-head is equivariant by construction; expected error magnitude is
-~float32-roundoff (a few times 1e-6, well under the 1e-5 threshold).
-For Model 1 (the baseline), this metric quantifies the "implicit
-equivariance" learned from canonicalized data after training.
+    equivariance_error_sgchess(model, n_samples=64, device='cpu') -> {
+        "sigma_c": ..., "overall_mean": ...,
+    }
+
+The GChess variant matches CLAUDE.md "Equivariance Error Metric"; the
+SGChess variant tests ONLY the single non-identity element sigma_c
+(the only non-identity element of the SG_chess subgroup), and is the
+right metric for ``GCNNChess(group=SGCHESS_GROUP)``.
+
+Both run in ``model.eval()`` + ``torch.no_grad()``. For Models 2 and 3
+each head is equivariant by construction under the corresponding
+group; expected error magnitude is ~float32-roundoff (a few times
+1e-6). For Model 1 (the baseline), the GChess metric quantifies the
+"implicit equivariance" learned from canonicalized data after training.
 """
 
 from __future__ import annotations
@@ -121,7 +129,54 @@ def equivariance_error(
     }
 
 
+def equivariance_error_sgchess(
+    model: nn.Module,
+    n_samples: int = 64,
+    device: str = "cpu",
+    eps: float = 1e-9,
+) -> Dict[str, float]:
+    """Per-element relative-Frobenius equivariance error for SGChess
+    (subgroup = {e, sigma_c}).
+
+    Only the single non-identity element ``sigma_c`` is tested — sigma_h
+    and sigma_hc are NOT part of SG_chess, and an SGChess-equivariant
+    model is not expected to be equivariant under them.
+
+    Returns dict with keys ``"sigma_c"`` and ``"overall_mean"`` (which
+    is the same value here, kept for API symmetry with the GChess
+    variant).
+    """
+    was_training = model.training
+    model.eval()
+
+    head_actions = (group_action_policy, group_action_value, group_action_mlh)
+    total = 0.0
+
+    with torch.no_grad():
+        for _ in range(n_samples):
+            x = sample_chess_input(batch_size=1, device=device)
+            fx = model(x)
+
+            gx = group_action_input(GChess.SIGMA_C, x)
+            fgx = model(gx)
+            gfx = tuple(act(GChess.SIGMA_C, h) for act, h in zip(head_actions, fx))
+
+            head_errs = []
+            for f_after_g, target, original in zip(fgx, gfx, fx):
+                diff = (f_after_g - target).norm()
+                norm = original.norm()
+                head_errs.append((diff / (norm + eps)).item())
+            total += sum(head_errs) / len(head_errs)
+
+    if was_training:
+        model.train()
+
+    mean = total / n_samples
+    return {"sigma_c": mean, "overall_mean": mean}
+
+
 __all__ = [
     "sample_chess_input",
     "equivariance_error",
+    "equivariance_error_sgchess",
 ]
