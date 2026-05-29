@@ -48,6 +48,7 @@ from .gcnn import GROUP_SIZE, GBatchNorm, GConv, GSELayer
 from .policy_map import (
     POLICY_INDEX_SIZE,
     POLICY_NUM_CHANNELS,
+    build_flipgroup_orbit_policy_gather,
     build_orbit_policy_gather,
     build_policy_gather_indices,
     build_sgchess_orbit_policy_gather,
@@ -182,12 +183,14 @@ class EquivariantPolicyHead(nn.Module):
     exactly by ``build_policy_permutation(sigma)``. See
     ``models/policy_map.py`` for the derivation.
 
-    Two gather flavours, one per supported group:
+    Three gather flavours, one per supported group:
 
     * ``GCHESS_GROUP`` -> ``build_orbit_policy_gather``: Klein-4 orbits
       placed on 2x2 (rank-pair, file-pair) blocks per channel.
     * ``SGCHESS_GROUP`` -> ``build_sgchess_orbit_policy_gather``: Z/2
       orbits placed on rank-pair cells per channel.
+    * ``FLIPGROUP_GROUP`` -> ``build_flipgroup_orbit_policy_gather``: Z/2
+      orbits placed on file-pair cells per channel.
     """
 
     POLICY_NUM_CHANNELS = POLICY_NUM_CHANNELS  # 80
@@ -209,10 +212,12 @@ class EquivariantPolicyHead(nn.Module):
             gather = build_orbit_policy_gather(self.POLICY_NUM_CHANNELS)
         elif group.name == "sgchess":
             gather = build_sgchess_orbit_policy_gather(self.POLICY_NUM_CHANNELS)
+        elif group.name == "flipgroup":
+            gather = build_flipgroup_orbit_policy_gather(self.POLICY_NUM_CHANNELS)
         else:
             raise ValueError(
                 f"EquivariantPolicyHead: no orbit gather available for group "
-                f"{group.name!r}; expected 'gchess' or 'sgchess'."
+                f"{group.name!r}; expected 'gchess', 'sgchess' or 'flipgroup'."
             )
         self.register_buffer("policy_gather", gather, persistent=False)
 
@@ -239,49 +244,49 @@ class EquivariantValueHead(nn.Module):
         GConv(F, 32, 3x3)      -> GBN -> ReLU
         GConv(32, hidden, 8x8) -> GBN -> ReLU       # collapses spatial to 1x1
         squeeze spatial       -> (B, hidden, |G|)
-        Partition the group axis into a "W-half" and an "L-half" via
-        the SIGMA_C action — within each half, sum the group fibers:
-            W_feat = sum_{g in W-half} h[:, :, g]
-            L_feat = sum_{g in L-half} h[:, :, g]
-            D_feat = sum_{g in G} h[:, :, g]      # fully invariant
-        SHARED ``wl_linear`` applied to BOTH W_feat and L_feat
-            -> (W_logit, L_logit) — a single nn.Linear instance applied twice.
-        Separate ``d_linear(D_feat)`` -> D_logit
+        ... group-fiber readout (see the two modes below) ...
         cat(W, D, L), softmax -> (B, 3)
 
-    W/L half partition. Under SIGMA_C on the group axis, the GChess
-    element at local index ``g`` maps to the GChess element at the
-    index whose ``to_gchess`` value is ``SIGMA_C . to_gchess[g]``.
-    The 4-element GChess: orbits are {E, SIGMA_C} and {SIGMA_H,
-    SIGMA_HC}. We label as "W-half" the indices whose ``to_gchess`` is
-    E or SIGMA_H (i.e. the SIGMA_H-orbit of E in G_chess), and as
-    "L-half" the indices whose ``to_gchess`` is SIGMA_C or SIGMA_HC.
-    Under SIGMA_C these halves swap.
+    The required output transform depends on which group elements are
+    present (per CLAUDE.md): SIGMA_C (color swap) maps [W, D, L] ->
+    [L, D, W]; SIGMA_H (file flip) leaves [W, D, L] unchanged. So the
+    head has TWO modes, chosen automatically from ``group``:
 
-    For ``GCHESS_GROUP`` (|G|=4): W-half = {0, 1}, L-half = {2, 3}, so
-    ``W_feat = h[:,:,0] + h[:,:,1]``, ``L_feat = h[:,:,2] + h[:,:,3]``.
-    For ``SGCHESS_GROUP`` (|G|=2, local indices: 0=E, 1=SIGMA_C):
-    W-half = {0}, L-half = {1}, so ``W_feat = h[:,:,0]``,
-    ``L_feat = h[:,:,1]``.
+    --- Mode A: COLOR-SWAP (group contains SIGMA_C and/or SIGMA_HC) ---
+    Used for GCHESS_GROUP and SGCHESS_GROUP. Partition the group axis
+    into a "W-half" (local indices whose ``to_gchess`` is E or SIGMA_H)
+    and an "L-half" (``to_gchess`` is SIGMA_C or SIGMA_HC), then:
+        W_feat = sum_{g in W-half} h[:, :, g]
+        L_feat = sum_{g in L-half} h[:, :, g]
+        D_feat = sum_{g in G}      h[:, :, g]      # fully invariant
+        W_logit = wl_linear(W_feat); L_logit = wl_linear(L_feat)  # SHARED
+        D_logit = d_linear(D_feat)
 
-    Equivariance under SIGMA_C in either group: the group-axis perm
-    swaps W-half indices with L-half indices, so W_feat and L_feat
-    swap. Because ``wl_linear`` is SHARED (one instance applied twice),
-    ``W_logit_new = wl_linear(L_feat_old) = L_logit_old`` and vice
-    versa. ``D_feat`` is invariant (sum over the whole group axis).
-    Output ``[W, D, L]`` swaps to ``[L, D, W]`` — matches
-    ``group_action_value(SIGMA_C)``.
+    Under SIGMA_C the group-axis perm swaps the W-half with the L-half,
+    so W_feat and L_feat swap; with the SHARED ``wl_linear`` (one
+    instance applied twice) this gives W_logit <-> L_logit, i.e. output
+    [W, D, L] -> [L, D, W]. Under SIGMA_H (GChess only) the perm stays
+    within each half, so the sums — and the output — are unchanged.
+    For GCHESS (|G|=4): W-half={0,1}, L-half={2,3}. For SGCHESS (|G|=2):
+    W-half={0}, L-half={1}.
 
-    Equivariance under SIGMA_H (GChess only). The group-axis perm
-    swaps within each W/L half, so the sums W_feat and L_feat are
-    unchanged. Output unchanged — matches ``group_action_value(SIGMA_H)
-    = identity``.
+    Critical: ``wl_linear`` MUST be a single nn.Linear applied twice —
+    two separate instances would get different gradients and diverge,
+    breaking SIGMA_C equivariance after the first step.
 
-    Critical implementation note: ``self.wl_linear`` MUST be a single
-    nn.Linear instance applied twice — not two separate nn.Linears
-    with copied weights. Two instances would receive different
-    gradients from each forward path and diverge during training,
-    breaking equivariance.
+    --- Mode B: INVARIANT (group has NO color swap) ---
+    Used for FLIPGROUP_GROUP = {E, SIGMA_H}. SIGMA_H must leave WDL
+    unchanged, and there is no element that swaps W with L, so the
+    head is fully INVARIANT: build one SIGMA_H-invariant feature by
+    summing over the whole group axis and read out W, D, L with THREE
+    INDEPENDENT linears (no sharing — nothing constrains W against L):
+        feat   = sum_{g in G} h[:, :, g]          # SIGMA_H-invariant
+        W_logit = w_linear(feat)
+        D_logit = d_linear(feat)
+        L_logit = l_linear(feat)
+    Under SIGMA_H the group-axis perm permutes the summed fibers, so
+    ``feat`` (and therefore every logit) is unchanged — output
+    invariant, matching ``group_action_value(SIGMA_H) = identity``.
     """
 
     def __init__(
@@ -297,15 +302,12 @@ class EquivariantValueHead(nn.Module):
         self.bn1 = GBatchNorm(32, group=group)
         self.conv2 = GConv(32, hidden, 8, padding=0, bias=True, group=group)
         self.bn2 = GBatchNorm(hidden, group=group)
-        # SHARED across W and L outputs (CRITICAL for sigma_c-equivariance).
-        self.wl_linear = nn.Linear(hidden, 1, bias=True)
-        self.d_linear = nn.Linear(hidden, 1, bias=True)
 
-        # Build W/L index buffers based on the group's GChess mapping.
-        # W-half: local indices g such that to_gchess[g] is E or SIGMA_H.
-        # L-half: local indices g such that to_gchess[g] is SIGMA_C or SIGMA_HC.
-        # Under SIGMA_C action on the group axis, these halves swap
-        # exactly (verified by composition table).
+        # Partition the group axis by the GChess element each local index
+        # maps to. W-half: to_gchess in {E, SIGMA_H}. L-half: to_gchess in
+        # {SIGMA_C, SIGMA_HC}. The identity is always present so W-half is
+        # never empty; L-half is empty iff the group contains NO color-swap
+        # element (the FlipGroup case).
         w_half = [
             g
             for g in range(group.order)
@@ -316,23 +318,32 @@ class EquivariantValueHead(nn.Module):
             for g in range(group.order)
             if group.to_gchess[g] in (int(GChess.SIGMA_C), int(GChess.SIGMA_HC))
         ]
-        if not w_half or not l_half:
+        if not w_half:
+            # Cannot happen for any GroupDef (identity maps to E), but
+            # guard against a malformed table.
             raise ValueError(
-                f"EquivariantValueHead requires a group that contains BOTH a "
-                f"W-half element (E or SIGMA_H) and an L-half element "
-                f"(SIGMA_C or SIGMA_HC). Group {group.name!r} has "
-                f"w_half={w_half}, l_half={l_half}."
+                f"EquivariantValueHead: group {group.name!r} has no identity "
+                f"fiber (empty W-half) — malformed group."
             )
-        self.register_buffer(
-            "w_half_indices",
-            torch.tensor(w_half, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "l_half_indices",
-            torch.tensor(l_half, dtype=torch.long),
-            persistent=False,
-        )
+
+        self.color_swap = bool(l_half)
+        if self.color_swap:
+            # Mode A: shared wl_linear + separate d_linear.
+            self.wl_linear = nn.Linear(hidden, 1, bias=True)
+            self.d_linear = nn.Linear(hidden, 1, bias=True)
+            self.register_buffer(
+                "w_half_indices", torch.tensor(w_half, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "l_half_indices", torch.tensor(l_half, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            # Mode B: three independent linears on a single invariant feature.
+            self.w_linear = nn.Linear(hidden, 1, bias=True)
+            self.d_linear = nn.Linear(hidden, 1, bias=True)
+            self.l_linear = nn.Linear(hidden, 1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn1(self.conv1(x)))   # (B, 32 * |G|, 8, 8)
@@ -342,13 +353,18 @@ class EquivariantValueHead(nn.Module):
         # group axis enumerates local indices 0..|G|-1.
         h = x.view(b, self.hidden, self.group.order)
 
-        W_feat = h.index_select(dim=2, index=self.w_half_indices).sum(dim=2)  # (B, hidden)
-        L_feat = h.index_select(dim=2, index=self.l_half_indices).sum(dim=2)  # (B, hidden)
-        D_feat = h.sum(dim=2)                                                  # (B, hidden)
-
-        W_logit = self.wl_linear(W_feat)
-        L_logit = self.wl_linear(L_feat)
-        D_logit = self.d_linear(D_feat)
+        if self.color_swap:
+            W_feat = h.index_select(dim=2, index=self.w_half_indices).sum(dim=2)
+            L_feat = h.index_select(dim=2, index=self.l_half_indices).sum(dim=2)
+            D_feat = h.sum(dim=2)
+            W_logit = self.wl_linear(W_feat)
+            L_logit = self.wl_linear(L_feat)   # SAME instance as W
+            D_logit = self.d_linear(D_feat)
+        else:
+            feat = h.sum(dim=2)                # (B, hidden) — fully invariant
+            W_logit = self.w_linear(feat)
+            D_logit = self.d_linear(feat)
+            L_logit = self.l_linear(feat)
 
         logits = torch.cat([W_logit, D_logit, L_logit], dim=1)  # (B, 3)
         return F.softmax(logits, dim=1)

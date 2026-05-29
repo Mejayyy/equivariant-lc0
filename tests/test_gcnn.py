@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from models.gcnn import (
+    FLIPGROUP_GROUP,
     GCHESS_GROUP,
     GROUP_SIZE,
     GBatchNorm,
@@ -31,7 +32,7 @@ from models.gcnn import (
     regular_rep_perm,
 )
 from symmetry.actions import group_action_input
-from symmetry.group import COMPOSITION_TABLE, ELEMENTS, GChess, SGChess
+from symmetry.group import COMPOSITION_TABLE, ELEMENTS, FlipGroup, GChess, SGChess
 
 
 # ---------------------------------------------------------------------------

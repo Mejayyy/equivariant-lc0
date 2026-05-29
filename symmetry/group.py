@@ -1,5 +1,6 @@
 """G_chess = Z/2Z x Z/2Z = {e, sigma_h, sigma_c, sigma_h o sigma_c} and
-its subgroup SG_chess = {e, sigma_c} ~ Z/2Z.
+its two order-2 subgroups SG_chess = {e, sigma_c} ~ Z/2Z (color swap)
+and FlipGroup = {e, sigma_h} ~ Z/2Z (file flip).
 
 Fixed enumeration of G_chess (used by every other module):
     0 = e
@@ -26,10 +27,10 @@ to handle a group generically:
                             ``symmetry.actions`` from primitives that
                             only know about the abstract group.
 
-`GCHESS_GROUP` and `SGCHESS_GROUP` are the two values in use. The G-CNN
-primitives (`LiftingConv`, `GConv`, ...) and the equivariant heads
-accept a `group` keyword that defaults to `GCHESS_GROUP` for
-backward compatibility.
+`GCHESS_GROUP`, `SGCHESS_GROUP` and `FLIPGROUP_GROUP` are the values in
+use. The G-CNN primitives (`LiftingConv`, `GConv`, ...) and the
+equivariant heads accept a `group` keyword that defaults to
+`GCHESS_GROUP` for backward compatibility.
 """
 
 from dataclasses import dataclass
@@ -51,6 +52,19 @@ class SGChess(IntEnum):
     SIGMA_C = 1
 
 
+class FlipGroup(IntEnum):
+    """Local enumeration of the FlipGroup subgroup = {e, sigma_h}.
+
+    sigma_h is the file flip (reflection across the vertical axis,
+    ``torch.flip(x, [-1])``; file A <-> file H). Unlike sigma_c it has
+    NO channel permutation and NO plane-30 sign flip — it is a pure
+    spatial reflection.
+    """
+
+    E = 0
+    SIGMA_H = 1
+
+
 ELEMENTS = (GChess.E, GChess.SIGMA_H, GChess.SIGMA_C, GChess.SIGMA_HC)
 ORDER = 4
 
@@ -67,6 +81,17 @@ SGCHESS_ORDER = 2
 
 # SG_chess as Z_2: e and sigma_c, each its own inverse.
 SGCHESS_COMPOSITION_TABLE = (
+    (0, 1),
+    (1, 0),
+)
+
+FLIPGROUP_ELEMENTS = (FlipGroup.E, FlipGroup.SIGMA_H)
+FLIPGROUP_ORDER = 2
+
+# FlipGroup as Z_2: e and sigma_h, each its own inverse. Same abstract
+# Z_2 structure as SG_chess but with sigma_h (file flip) as the
+# generator instead of sigma_c.
+FLIPGROUP_COMPOSITION_TABLE = (
     (0, 1),
     (1, 0),
 )
@@ -141,4 +166,11 @@ SGCHESS_GROUP = GroupDef(
     order=SGCHESS_ORDER,
     composition_table=SGCHESS_COMPOSITION_TABLE,
     to_gchess=(int(GChess.E), int(GChess.SIGMA_C)),
+)
+
+FLIPGROUP_GROUP = GroupDef(
+    name="flipgroup",
+    order=FLIPGROUP_ORDER,
+    composition_table=FLIPGROUP_COMPOSITION_TABLE,
+    to_gchess=(int(GChess.E), int(GChess.SIGMA_H)),
 )

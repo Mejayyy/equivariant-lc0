@@ -60,6 +60,7 @@ import torch.nn.functional as F
 from symmetry.actions import group_action_output as _spatial_action
 from symmetry.group import (
     COMPOSITION_TABLE,
+    FLIPGROUP_GROUP,
     GCHESS_GROUP,
     GChess,
     GroupDef,
@@ -627,6 +628,12 @@ class GCNNChess(nn.Module):
       checks ``sigma_c`` (and ``equivariance_error`` would report
       non-zero errors for ``sigma_h`` and ``sigma_hc`` because the
       model is NOT equivariant under those).
+    * ``FLIPGROUP_GROUP`` — sigma_h-only equivariance (the file-flip
+      subgroup). |G| = 2; use ``equivariance_error_flipgroup`` (which
+      tests only ``sigma_h``). The model is NOT equivariant under
+      ``sigma_c`` / ``sigma_hc``. Note the value head here is fully
+      INVARIANT (sigma_h does not swap W<->L), unlike the GChess /
+      SGChess value heads.
     """
 
     def __init__(
@@ -678,5 +685,6 @@ __all__ = [
     # Re-export the group descriptors for convenience.
     "GCHESS_GROUP",
     "SGCHESS_GROUP",
+    "FLIPGROUP_GROUP",
     "GroupDef",
 ]

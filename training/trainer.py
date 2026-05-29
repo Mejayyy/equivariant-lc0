@@ -5,7 +5,7 @@ data.
 Usage (CLI)::
 
     python -m training.trainer \\
-        --model {baseline,gcnn,sgcnn} \\
+        --model {baseline,gcnn,sgcnn,fgcnn} \\
         --blocks 10 --filters 128 \\
         --batch-size 256 --lr 1e-3 \\
         --max-steps 10000 \\
@@ -48,12 +48,18 @@ from torch.utils.data import DataLoader
 
 from data.config import DATA_SPLITS
 from data.dataset import LCZeroV6Dataset
-from models import BaselineLCZero, GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
+from models import (
+    BaselineLCZero,
+    FLIPGROUP_GROUP,
+    GCHESS_GROUP,
+    GCNNChess,
+    SGCHESS_GROUP,
+)
 
 from .losses import combined_loss
 
 
-MODEL_NAMES = ("baseline", "gcnn", "sgcnn")
+MODEL_NAMES = ("baseline", "gcnn", "sgcnn", "fgcnn")
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +76,8 @@ def build_model(
     fc_size: int = 128,
 ) -> nn.Module:
     """Build one of: ``baseline``, ``gcnn`` (full G_chess), ``sgcnn``
-    (SG_chess subgroup, sigma_c only)."""
+    (SG_chess subgroup, sigma_c only), ``fgcnn`` (FlipGroup subgroup,
+    sigma_h only)."""
     if name == "baseline":
         return BaselineLCZero(
             blocks=blocks,
@@ -97,6 +104,15 @@ def build_model(
             fc_size=fc_size,
             group=SGCHESS_GROUP,
         )
+    if name == "fgcnn":
+        return GCNNChess(
+            blocks=blocks,
+            filters=filters,
+            se_channels=se_channels,
+            mlh_channels=mlh_channels,
+            fc_size=fc_size,
+            group=FLIPGROUP_GROUP,
+        )
     raise ValueError(
         f"unknown model: {name}; expected one of {MODEL_NAMES}"
     )
@@ -107,11 +123,24 @@ def make_loaders(
     num_workers: int,
     shuffle_buffer: int,
     pin_memory: bool,
+    turn_start: int = 0,
+    max_plies_left: Optional[float] = None,
 ) -> Tuple[DataLoader, DataLoader]:
+    # The game-phase filters (turn_start / max_plies_left) are applied to
+    # BOTH train and val so the validation loss reflects the same slice of
+    # the game the model is trained on (otherwise val loss isn't comparable).
     train_ds = LCZeroV6Dataset(
-        folders=DATA_SPLITS["train"], shuffle_buffer=shuffle_buffer
+        folders=DATA_SPLITS["train"],
+        shuffle_buffer=shuffle_buffer,
+        turn_start=turn_start,
+        max_plies_left=max_plies_left,
     )
-    val_ds = LCZeroV6Dataset(folders=DATA_SPLITS["val"], shuffle_buffer=0)
+    val_ds = LCZeroV6Dataset(
+        folders=DATA_SPLITS["val"],
+        shuffle_buffer=0,
+        turn_start=turn_start,
+        max_plies_left=max_plies_left,
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -277,6 +306,11 @@ def train(args: argparse.Namespace) -> None:
         f"[init] model={args.model}  blocks={args.blocks}  "
         f"filters={args.filters}  se={args.se_channels}"
     )
+    if args.turn_start > 0 or args.max_plies_left is not None:
+        print(
+            f"[init] game-phase filter: turn_start={args.turn_start} (plies) "
+            f"max_plies_left={args.max_plies_left}"
+        )
     model = build_model(
         args.model,
         args.blocks,
@@ -305,6 +339,8 @@ def train(args: argparse.Namespace) -> None:
         num_workers=args.num_workers,
         shuffle_buffer=args.shuffle_buffer,
         pin_memory=pin_memory,
+        turn_start=args.turn_start,
+        max_plies_left=args.max_plies_left,
     )
 
     out_dir = Path(args.output_dir)
@@ -493,6 +529,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0,
                    help="WARNING: >0 requires worker-side file sharding "
                         "(not yet implemented); default 0 is safe.")
+
+    # Game-phase filters (focus training on a slice of the game, e.g.
+    # endgames). Applied to BOTH the train and val streams. Each .gz is one
+    # game in ply order, so the record index == ply-from-start.
+    p.add_argument("--turn-start", type=int, default=0,
+                   help="skip the first N records (plies / half-moves) of "
+                        "every game; keep positions from ply N onward. "
+                        "Default 0 keeps everything.")
+    p.add_argument("--max-plies-left", type=float, default=None,
+                   help="keep only positions with plies_left <= this value, "
+                        "i.e. within this many plies of the game END (the "
+                        "truer 'endgame' selector). Default None keeps "
+                        "everything. Combine with --turn-start to keep a "
+                        "mid-to-end window.")
 
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     p.add_argument("--device", default=default_device)

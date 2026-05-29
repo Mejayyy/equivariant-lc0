@@ -1,5 +1,6 @@
 from .baseline import BaselineBody, BaselineLCZero, ResBlock, SELayer
 from .gcnn import (
+    FLIPGROUP_GROUP,
     GCHESS_GROUP,
     GROUP_SIZE,
     GBatchNorm,
@@ -31,6 +32,7 @@ from .policy_map import (
     POLICY_NUM_CHANNELS,
     UCI_TO_POLICY_INDEX,
     build_flat_to_policy_index,
+    build_flipgroup_orbit_policy_gather,
     build_orbit_policy_gather,
     build_policy_gather_indices,
     build_sgchess_orbit_policy_gather,
@@ -52,6 +54,7 @@ __all__ = [
     "build_flat_to_policy_index",
     "build_orbit_policy_gather",
     "build_sgchess_orbit_policy_gather",
+    "build_flipgroup_orbit_policy_gather",
     # baseline
     "BaselineLCZero",
     "BaselineBody",
@@ -64,6 +67,7 @@ __all__ = [
     "GROUP_SIZE",
     "GCHESS_GROUP",
     "SGCHESS_GROUP",
+    "FLIPGROUP_GROUP",
     "GroupDef",
     "LiftingConv",
     "GConv",

@@ -175,8 +175,55 @@ def equivariance_error_sgchess(
     return {"sigma_c": mean, "overall_mean": mean}
 
 
+def equivariance_error_flipgroup(
+    model: nn.Module,
+    n_samples: int = 64,
+    device: str = "cpu",
+    eps: float = 1e-9,
+) -> Dict[str, float]:
+    """Per-element relative-Frobenius equivariance error for FlipGroup
+    (subgroup = {e, sigma_h}).
+
+    Only the single non-identity element ``sigma_h`` (file flip) is
+    tested — sigma_c and sigma_hc are NOT part of FlipGroup, and a
+    FlipGroup-equivariant model is not expected to be equivariant under
+    them.
+
+    Returns dict with keys ``"sigma_h"`` and ``"overall_mean"`` (the
+    same value here, kept for API symmetry with the other variants).
+    """
+    was_training = model.training
+    model.eval()
+
+    head_actions = (group_action_policy, group_action_value, group_action_mlh)
+    total = 0.0
+
+    with torch.no_grad():
+        for _ in range(n_samples):
+            x = sample_chess_input(batch_size=1, device=device)
+            fx = model(x)
+
+            gx = group_action_input(GChess.SIGMA_H, x)
+            fgx = model(gx)
+            gfx = tuple(act(GChess.SIGMA_H, h) for act, h in zip(head_actions, fx))
+
+            head_errs = []
+            for f_after_g, target, original in zip(fgx, gfx, fx):
+                diff = (f_after_g - target).norm()
+                norm = original.norm()
+                head_errs.append((diff / (norm + eps)).item())
+            total += sum(head_errs) / len(head_errs)
+
+    if was_training:
+        model.train()
+
+    mean = total / n_samples
+    return {"sigma_h": mean, "overall_mean": mean}
+
+
 __all__ = [
     "sample_chess_input",
     "equivariance_error",
     "equivariance_error_sgchess",
+    "equivariance_error_flipgroup",
 ]
