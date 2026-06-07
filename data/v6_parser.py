@@ -50,6 +50,14 @@ _V6_STRUCT_FMT = '<II7432s832sBBBBBBBbfffffffffffffffIHH8s'
 assert struct.calcsize(_V6_STRUCT_FMT) == V6_RECORD_SIZE
 _V6_STRUCT = struct.Struct(_V6_STRUCT_FMT)
 
+# Byte offset of the `plies_left` float within a record. The 15 floats
+# start after II + probabilities + planes + 7 uint8 + 1 int8; plies_left
+# is the 7th float (root_q, best_q, root_d, best_d, root_m, best_m,
+# plies_left). Derived (not hand-counted) so it stays correct if the
+# prefix layout ever changes.
+_PLIES_LEFT_OFFSET = struct.calcsize('<II7432s832sBBBBBBBbffffff')  # == 8304
+assert _PLIES_LEFT_OFFSET == 8304
+
 
 @dataclass
 class V6Record:
@@ -141,9 +149,69 @@ def iter_v6_records_from_file(path: Union[str, Path]) -> Iterator[V6Record]:
             yield parse_v6_record(buf)
 
 
+def count_records_in_file(path: Union[str, Path]) -> int:
+    """Number of V6 records in one `.gz` chunk, WITHOUT decompressing.
+
+    Uses the gzip ISIZE trailer (last 4 bytes = uncompressed size mod
+    2^32). LCZero chunks are single-member gzip streams of one game,
+    far under 4 GB, and every record is exactly ``V6_RECORD_SIZE``
+    bytes, so ``ISIZE // V6_RECORD_SIZE`` is the exact record count.
+
+    Falls back to a full decompress-and-count if the trailer does not
+    cleanly divide by the record size (e.g. a multi-member gzip file or
+    a truncated trailer), so correctness never depends on the fast path.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-4, 2)
+            isize = struct.unpack("<I", fh.read(4))[0]
+        if isize > 0 and isize % V6_RECORD_SIZE == 0:
+            return isize // V6_RECORD_SIZE
+    except OSError:
+        pass
+
+    # Fallback: decompress and count record-sized chunks.
+    n = 0
+    with gzip.open(path, "rb") as f:
+        while True:
+            buf = f.read(V6_RECORD_SIZE)
+            if not buf:
+                break
+            if len(buf) != V6_RECORD_SIZE:
+                raise ValueError(
+                    f"Truncated V6 record in {path}: got {len(buf)} bytes "
+                    f"(expected {V6_RECORD_SIZE})"
+                )
+            n += 1
+    return n
+
+
+def iter_plies_left_from_file(path: Union[str, Path]) -> Iterator[float]:
+    """Yield only the ``plies_left`` float of each record in a chunk.
+
+    Decompresses (so it pays the gzip cost) but parses just the single
+    float at ``_PLIES_LEFT_OFFSET`` instead of building a full
+    ``V6Record`` — much cheaper than ``iter_v6_records_from_file`` when
+    counting positions under a ``max_plies_left`` filter.
+    """
+    with gzip.open(path, "rb") as f:
+        while True:
+            buf = f.read(V6_RECORD_SIZE)
+            if not buf:
+                return
+            if len(buf) != V6_RECORD_SIZE:
+                raise ValueError(
+                    f"Truncated V6 record in {path}: got {len(buf)} bytes "
+                    f"(expected {V6_RECORD_SIZE})"
+                )
+            yield struct.unpack_from("<f", buf, _PLIES_LEFT_OFFSET)[0]
+
+
 __all__ = [
     "V6_RECORD_SIZE",
     "V6Record",
     "parse_v6_record",
     "iter_v6_records_from_file",
+    "count_records_in_file",
+    "iter_plies_left_from_file",
 ]

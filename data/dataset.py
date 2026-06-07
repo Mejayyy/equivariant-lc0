@@ -52,16 +52,45 @@ Sample = Tuple[torch.Tensor, dict]
 
 
 class LCZeroV6Dataset(IterableDataset):
+    """Iterates `(planes, targets)` over V6 chunk games.
+
+    Provide EXACTLY ONE of:
+      * ``folders`` — directories; their `*.gz` files are used in sorted
+        order (legacy fixed-folder mode), or
+      * ``files`` — an explicit list of `.gz` paths, used IN THE GIVEN
+        ORDER (pooled-split mode; the caller has already shuffled games).
+
+    ``max_samples`` caps how many *filtered* samples a single pass
+    (epoch) yields. Combined with a large file pool this delivers a
+    constant number of plies regardless of the `turn_start` /
+    `max_plies_left` filters (the filter runs first, then the cap). If the
+    filtered pool is smaller than ``max_samples`` the pass simply yields
+    everything available (the trainer warns about the shortfall).
+    """
+
     def __init__(
         self,
-        folders: Iterable[Union[str, Path]],
+        folders: Optional[Iterable[Union[str, Path]]] = None,
+        files: Optional[Iterable[Union[str, Path]]] = None,
         shuffle_buffer: int = 8192,
         seed: int = 0,
         turn_start: int = 0,
         max_plies_left: Optional[float] = None,
+        max_samples: Optional[int] = None,
     ):
         super().__init__()
-        self.folders: List[Path] = [Path(f) for f in folders]
+        if (folders is None) == (files is None):
+            raise ValueError(
+                "provide exactly one of `folders` or `files`"
+            )
+        self.folders: Optional[List[Path]] = (
+            [Path(f) for f in folders] if folders is not None else None
+        )
+        # Explicit files keep their given order (already game-shuffled by the
+        # caller); we do NOT re-sort them.
+        self._files: Optional[List[Path]] = (
+            [Path(f) for f in files] if files is not None else None
+        )
         self.shuffle_buffer = int(shuffle_buffer)
         self.seed = int(seed)
         self.turn_start = int(turn_start)
@@ -74,8 +103,15 @@ class LCZeroV6Dataset(IterableDataset):
             raise ValueError(
                 f"max_plies_left must be >= 0 or None, got {self.max_plies_left}"
             )
+        self.max_samples = None if max_samples is None else int(max_samples)
+        if self.max_samples is not None and self.max_samples < 0:
+            raise ValueError(
+                f"max_samples must be >= 0 or None, got {self.max_samples}"
+            )
 
     def list_files(self) -> List[Path]:
+        if self._files is not None:
+            return self._files  # explicit order preserved (game-shuffled)
         files: List[Path] = []
         for folder in self.folders:
             files.extend(sorted(folder.glob("*.gz")))
@@ -110,7 +146,54 @@ class LCZeroV6Dataset(IterableDataset):
                     continue
                 yield self._record_to_sample(rec)
 
-    def __iter__(self) -> Iterator[Sample]:
+    def count_samples(self) -> int:
+        """Number of samples this dataset yields in one pass (honoring the
+        turn_start / max_plies_left filters AND the ``max_samples`` cap),
+        WITHOUT building tensors.
+
+        Two paths:
+          * No plies filter (max_plies_left is None): count records per
+            file from the gzip trailer (no decompression) and subtract the
+            skipped ``turn_start`` prefix. Near-instant.
+          * Plies filter active: decompress each file and read only the
+            ``plies_left`` float per record (no plane/target tensors), then
+            apply both filters. Pays the gzip decompression cost.
+
+        In both paths we stop as soon as the ``max_samples`` cap is reached,
+        so when the pool is large this returns quickly (the cap, not the
+        whole pool). The return value is ``min(available_filtered, cap)``.
+        """
+        # Local import keeps the dataset module's import surface small and
+        # mirrors the lazy-import style used elsewhere.
+        from .v6_parser import count_records_in_file, iter_plies_left_from_file
+
+        cap = self.max_samples
+        total = 0
+        if self.max_plies_left is None:
+            for f in self.list_files():
+                n = count_records_in_file(f)
+                if self.turn_start:
+                    n = max(0, n - self.turn_start)
+                total += n
+                if cap is not None and total >= cap:
+                    return cap
+            return total
+
+        for f in self.list_files():
+            for idx, plies_left in enumerate(iter_plies_left_from_file(f)):
+                if idx < self.turn_start:
+                    continue
+                if plies_left > self.max_plies_left:
+                    continue
+                total += 1
+                if cap is not None and total >= cap:
+                    return cap
+        return total
+
+    def _iter_stream(self) -> Iterator[Sample]:
+        """The filtered sample stream, optionally ply-shuffled via a
+        reservoir buffer. Does NOT apply the max_samples cap (that is done
+        in __iter__)."""
         if self.shuffle_buffer <= 0:
             yield from self._iter_raw()
             return
@@ -126,6 +209,18 @@ class LCZeroV6Dataset(IterableDataset):
             buf[j] = sample
         rng.shuffle(buf)
         yield from buf
+
+    def __iter__(self) -> Iterator[Sample]:
+        cap = self.max_samples
+        if cap is None:
+            yield from self._iter_stream()
+            return
+        n = 0
+        for sample in self._iter_stream():
+            if n >= cap:
+                return
+            yield sample
+            n += 1
 
 
 __all__ = ["LCZeroV6Dataset"]

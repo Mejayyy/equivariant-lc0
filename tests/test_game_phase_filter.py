@@ -11,12 +11,14 @@ real V6 data on disk; a couple of integration checks use raw_data when it
 is present (skipped otherwise).
 """
 
+import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 import data.dataset as dataset_mod
+import data.v6_parser as v6_parser_mod
 from data.dataset import LCZeroV6Dataset
 
 
@@ -148,6 +150,80 @@ def test_filter_can_empty_the_stream(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# count_samples() — synthetic
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_counters(monkeypatch):
+    """Patch the v6_parser helpers count_samples() lazily imports, so we can
+    drive it with the two synthetic games without touching disk."""
+    counts = {"gameA.gz": len(_GAME_A), "gameB.gz": len(_GAME_B)}
+    plies = {"gameA.gz": _GAME_A, "gameB.gz": _GAME_B}
+    monkeypatch.setattr(
+        v6_parser_mod, "count_records_in_file",
+        lambda p: counts[Path(p).name],
+    )
+    monkeypatch.setattr(
+        v6_parser_mod, "iter_plies_left_from_file",
+        lambda p: iter(plies[Path(p).name]),
+    )
+
+
+def _ds_with_files(monkeypatch, **kw):
+    ds = LCZeroV6Dataset(folders=[], shuffle_buffer=0, **kw)
+    monkeypatch.setattr(ds, "list_files", lambda: [Path("gameA.gz"), Path("gameB.gz")])
+    _install_fake_counters(monkeypatch)
+    return ds
+
+
+def test_count_samples_no_filter_uses_record_counts(monkeypatch):
+    ds = _ds_with_files(monkeypatch)
+    assert ds.count_samples() == len(_GAME_A) + len(_GAME_B)  # 6 + 4
+
+
+def test_count_samples_turn_start_subtracts_prefix_per_game(monkeypatch):
+    ds = _ds_with_files(monkeypatch, turn_start=2)
+    # max(0, 6-2) + max(0, 4-2) = 4 + 2
+    assert ds.count_samples() == 6
+
+
+def test_count_samples_turn_start_clamps_at_zero(monkeypatch):
+    ds = _ds_with_files(monkeypatch, turn_start=100)
+    assert ds.count_samples() == 0
+
+
+def test_count_samples_max_plies_left(monkeypatch):
+    ds = _ds_with_files(monkeypatch, max_plies_left=7.0)
+    # plies_left <= 7: game A none; game B [7,6,5] -> 3
+    assert ds.count_samples() == 3
+
+
+def test_count_samples_both_filters(monkeypatch):
+    ds = _ds_with_files(monkeypatch, turn_start=2, max_plies_left=7.0)
+    # Only game B indices 2,3 (plies 6,5) survive -> 2
+    assert ds.count_samples() == 2
+
+
+def test_count_samples_matches_iter_raw(monkeypatch):
+    """count_samples() must equal the number of items _iter_raw() yields."""
+    for kw in (
+        {},
+        {"turn_start": 2},
+        {"max_plies_left": 7.0},
+        {"turn_start": 2, "max_plies_left": 7.0},
+    ):
+        ds = LCZeroV6Dataset(folders=[], shuffle_buffer=0, **kw)
+        monkeypatch.setattr(ds, "list_files", lambda: [Path("gameA.gz"), Path("gameB.gz")])
+        _install_fake_counters(monkeypatch)        # for count_samples
+        _install_fake_stream(monkeypatch, ds)      # for _iter_raw (overrides _record_to_sample + iter)
+        n_iter = len(list(ds._iter_raw()))
+        # _install_fake_stream patched iter_v6_records_from_file; counting
+        # uses the separately-patched count_records_in_file / plies iter.
+        n_count = ds.count_samples()
+        assert n_count == n_iter, f"{kw}: count={n_count} iter={n_iter}"
+
+
+# ---------------------------------------------------------------------------
 # Trainer CLI wiring
 # ---------------------------------------------------------------------------
 
@@ -173,6 +249,43 @@ def test_trainer_cli_game_phase_defaults():
     ])
     assert args.turn_start == 0
     assert args.max_plies_left is None
+
+
+def test_trainer_cli_count_samples_flag():
+    from training.trainer import parse_args
+
+    base = parse_args(["--model", "baseline", "--max-steps", "1", "--device", "cpu"])
+    assert base.count_samples is True  # default on
+    off = parse_args([
+        "--model", "baseline", "--max-steps", "1", "--device", "cpu",
+        "--no-count-samples",
+    ])
+    assert off.count_samples is False
+
+
+def test_trainer_cli_pooled_split_defaults_and_overrides():
+    from training.trainer import parse_args
+    from data.config import (
+        RAW_DATA_ROOT, TRAIN_SAMPLES, VAL_SAMPLES, SPLIT_SEED, DATA_SEED,
+    )
+
+    d = parse_args(["--model", "baseline", "--max-steps", "1", "--device", "cpu"])
+    assert d.data_root == RAW_DATA_ROOT
+    assert d.train_samples == TRAIN_SAMPLES
+    assert d.val_samples == VAL_SAMPLES
+    assert d.split_seed == SPLIT_SEED
+    assert d.data_seed == DATA_SEED
+
+    o = parse_args([
+        "--model", "baseline", "--max-steps", "1", "--device", "cpu",
+        "--data-root", "some/dir", "--train-samples", "1000",
+        "--val-samples", "200", "--split-seed", "7", "--data-seed", "9",
+    ])
+    assert o.data_root == "some/dir"
+    assert o.train_samples == 1000
+    assert o.val_samples == 200
+    assert o.split_seed == 7
+    assert o.data_seed == 9
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +333,123 @@ def test_max_plies_left_selects_endgame_on_real_data():
                 assert rec.plies_left <= 15.0
     # At least some endgame positions exist in the first 10 games.
     assert kept > 0
+
+
+def _copy_first_files(src_dir: Path, dst_dir: Path, n: int) -> int:
+    """Copy the first n .gz files from src_dir into dst_dir; return count."""
+    files = sorted(src_dir.glob("*.gz"))[:n]
+    for f in files:
+        shutil.copy(f, dst_dir / f.name)
+    return len(files)
+
+
+@skip_no_data
+def test_count_samples_matches_full_iteration_real_data(tmp_path):
+    """On a small real-data folder, count_samples() (fast ISIZE path)
+    must equal the number of records actually parsed."""
+    n_files = _copy_first_files(REAL_DATA_DIR, tmp_path, 4)
+    assert n_files > 0
+    ds = LCZeroV6Dataset(folders=[tmp_path], shuffle_buffer=0)
+    manual = sum(
+        1
+        for f in ds.list_files()
+        for _ in dataset_mod.iter_v6_records_from_file(f)
+    )
+    assert ds.count_samples() == manual
+
+
+@skip_no_data
+def test_count_samples_with_plies_filter_real_data(tmp_path):
+    """The slow (decompress) plies-filter path must agree with a manual
+    parse-and-filter over the same files."""
+    _copy_first_files(REAL_DATA_DIR, tmp_path, 4)
+    ds = LCZeroV6Dataset(folders=[tmp_path], shuffle_buffer=0,
+                         turn_start=5, max_plies_left=40.0)
+    manual = 0
+    for f in ds.list_files():
+        for idx, rec in enumerate(dataset_mod.iter_v6_records_from_file(f)):
+            if idx >= 5 and rec.plies_left <= 40.0:
+                manual += 1
+    assert ds.count_samples() == manual
+
+
+@skip_no_data
+def test_count_records_in_file_fast_matches_parse_real_data():
+    """The gzip-trailer fast count equals the parsed record count."""
+    from data.v6_parser import count_records_in_file, iter_v6_records_from_file
+
+    for f in sorted(REAL_DATA_DIR.glob("*.gz"))[:6]:
+        fast = count_records_in_file(f)
+        actual = sum(1 for _ in iter_v6_records_from_file(f))
+        assert fast == actual, f"{f.name}: fast={fast} actual={actual}"
+
+
+# ---------------------------------------------------------------------------
+# max_samples cap (the constant-budget mechanism for pooled splits)
+# ---------------------------------------------------------------------------
+
+
+def test_constructor_requires_exactly_one_source():
+    # neither folders nor files
+    with pytest.raises(ValueError):
+        LCZeroV6Dataset()
+    # both
+    with pytest.raises(ValueError):
+        LCZeroV6Dataset(folders=[], files=[])
+
+
+def test_explicit_files_order_preserved():
+    files = [Path("z.gz"), Path("a.gz"), Path("m.gz")]
+    ds = LCZeroV6Dataset(files=files, shuffle_buffer=0)
+    # list_files must NOT sort explicit files (the caller already game-shuffled).
+    assert ds.list_files() == files
+
+
+def test_max_samples_cap_no_shuffle(monkeypatch):
+    """With shuffle_buffer=0, __iter__ yields exactly max_samples (the cap),
+    even though the unfiltered stream has 10 samples."""
+    ds = LCZeroV6Dataset(folders=[], shuffle_buffer=0, max_samples=4)
+    _install_fake_stream(monkeypatch, ds)  # 6 + 4 = 10 samples available
+    out = list(ds)
+    assert len(out) == 4
+    # No shuffle -> the first 4 in stream order (game A indices 0..3).
+    assert out == _GAME_A[:4]
+
+
+def test_max_samples_cap_with_shuffle(monkeypatch):
+    """With a shuffle buffer, __iter__ still yields exactly max_samples."""
+    ds = LCZeroV6Dataset(folders=[], shuffle_buffer=3, seed=0, max_samples=5)
+    _install_fake_stream(monkeypatch, ds)
+    out = list(ds)
+    assert len(out) == 5
+    # All yielded values come from the real pool (10 samples).
+    assert set(out).issubset(set(_GAME_A + _GAME_B))
+
+
+def test_max_samples_cap_larger_than_pool_yields_all(monkeypatch):
+    """If the cap exceeds the (filtered) pool, yield everything available."""
+    ds = LCZeroV6Dataset(folders=[], shuffle_buffer=0, max_samples=999)
+    _install_fake_stream(monkeypatch, ds)
+    out = list(ds)
+    assert out == _GAME_A + _GAME_B  # all 10
+
+
+def test_max_samples_cap_composes_with_filter(monkeypatch):
+    """Filter first, then cap: max_plies_left keeps [7,6,5] (3), cap at 2."""
+    ds = LCZeroV6Dataset(folders=[], shuffle_buffer=0, max_plies_left=7.0, max_samples=2)
+    _install_fake_stream(monkeypatch, ds)
+    out = list(ds)
+    assert out == [7.0, 6.0]
+
+
+def test_count_samples_respects_cap(monkeypatch):
+    """count_samples returns min(available, cap) and stops early."""
+    ds = LCZeroV6Dataset(folders=[], max_samples=4)
+    monkeypatch.setattr(ds, "list_files", lambda: [Path("gameA.gz"), Path("gameB.gz")])
+    _install_fake_counters(monkeypatch)  # gameA=6, gameB=4 records
+    # No plies filter -> ISIZE path; total available = 10, cap = 4.
+    assert ds.count_samples() == 4
+
+    ds2 = LCZeroV6Dataset(folders=[], max_samples=999)
+    monkeypatch.setattr(ds2, "list_files", lambda: [Path("gameA.gz"), Path("gameB.gz")])
+    assert ds2.count_samples() == 10  # cap exceeds pool -> actual

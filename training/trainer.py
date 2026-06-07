@@ -22,7 +22,9 @@ Model variants:
   {e, sigma_c} subgroup equivariance only. |G| = 2; about half the
   body parameters of ``gcnn`` at matched (blocks, filters).
 
-Reads `DATA_SPLITS` from `data/config.py` for train / val folder lists.
+Pools all `.gz` games under `--data-root` (default `RAW_DATA_ROOT`) and
+splits them disjointly into train/val at the game level (see
+`data/splits.py`); draws a fixed budget of FILTERED plies per split.
 Writes checkpoints (``ckpt_<step>.pt``) and a JSON-Lines metrics log
 (``train_log.jsonl``) to ``--output-dir``. Stop with Ctrl-C; the most
 recent checkpoint on disk is the resumption point (re-launch with
@@ -46,8 +48,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from data.config import DATA_SPLITS
+from data.config import (
+    DATA_SEED,
+    RAW_DATA_ROOT,
+    SPLIT_SEED,
+    TRAIN_SAMPLES,
+    VAL_SAMPLES,
+)
 from data.dataset import LCZeroV6Dataset
+from data.splits import build_pooled_splits
 from models import (
     BaselineLCZero,
     FLIPGROUP_GROUP,
@@ -125,21 +134,47 @@ def make_loaders(
     pin_memory: bool,
     turn_start: int = 0,
     max_plies_left: Optional[float] = None,
+    data_root: str = RAW_DATA_ROOT,
+    train_samples: int = TRAIN_SAMPLES,
+    val_samples: int = VAL_SAMPLES,
+    split_seed: int = SPLIT_SEED,
+    data_seed: int = DATA_SEED,
 ) -> Tuple[DataLoader, DataLoader]:
-    # The game-phase filters (turn_start / max_plies_left) are applied to
-    # BOTH train and val so the validation loss reflects the same slice of
-    # the game the model is trained on (otherwise val loss isn't comparable).
+    """Build train/val loaders from a POOLED, game-level random split over
+    all games under ``data_root``.
+
+    - Games (whole `.gz` files) are pooled across every sub-folder and
+      partitioned into disjoint train/val sets with ``split_seed`` (no
+      per-game leakage; partition is filter-independent so the val games are
+      stable across turn_start / max_plies_left).
+    - Each loader draws a fixed budget of *filtered* plies — ``train_samples``
+      / ``val_samples`` — via the dataset's ``max_samples`` cap, so the counts
+      are constant regardless of the game-phase filters (given enough data).
+    - The game-phase filters are applied to BOTH splits so val loss reflects
+      the same game slice as training.
+    - Training shuffles plies (shuffle_buffer) for SGD decorrelation; each
+      sample is self-contained (current + 1-ply history), so this does not
+      affect the history. Validation iterates deterministically.
+    """
+    train_files, val_files = build_pooled_splits(
+        data_root, train_target=train_samples, val_target=val_samples,
+        seed=split_seed,
+    )
     train_ds = LCZeroV6Dataset(
-        folders=DATA_SPLITS["train"],
+        files=train_files,
         shuffle_buffer=shuffle_buffer,
+        seed=data_seed,
         turn_start=turn_start,
         max_plies_left=max_plies_left,
+        max_samples=train_samples,
     )
     val_ds = LCZeroV6Dataset(
-        folders=DATA_SPLITS["val"],
+        files=val_files,
         shuffle_buffer=0,
+        seed=data_seed,
         turn_start=turn_start,
         max_plies_left=max_plies_left,
+        max_samples=val_samples,
     )
     train_loader = DataLoader(
         train_ds,
@@ -341,7 +376,67 @@ def train(args: argparse.Namespace) -> None:
         pin_memory=pin_memory,
         turn_start=args.turn_start,
         max_plies_left=args.max_plies_left,
+        data_root=args.data_root,
+        train_samples=args.train_samples,
+        val_samples=args.val_samples,
+        split_seed=args.split_seed,
+        data_seed=args.data_seed,
     )
+    n_train_files = len(train_loader.dataset.list_files())
+    n_val_files = len(val_loader.dataset.list_files())
+    print(
+        f"[init] pooled split from {args.data_root!r}: "
+        f"{n_train_files:,} train games / {n_val_files:,} val games "
+        f"(split_seed={args.split_seed})"
+    )
+    print(
+        f"[init] targets: {args.train_samples:,} train / {args.val_samples:,} "
+        f"val filtered plies  (turn_start={args.turn_start}, "
+        f"max_plies_left={args.max_plies_left})"
+    )
+
+    # Actual sizes + expected epochs. count_samples() honors the same filters
+    # AND the max_samples cap, so it returns min(available, target) and stops
+    # early once the cap is hit. With no plies filter this is near-instant
+    # (gzip trailers); with a plies filter it decompresses until the cap.
+    num_train_samples = None
+    num_val_samples = None
+    expected_epochs = None
+    if args.count_samples:
+        print("[init] counting samples (stops at the target cap; "
+              "near-instant unless --max-plies-left is set)...")
+        num_train_samples = train_loader.dataset.count_samples()
+        num_val_samples = val_loader.dataset.count_samples()
+        samples_seen = args.max_steps * args.batch_size
+        expected_epochs = (
+            samples_seen / num_train_samples if num_train_samples else None
+        )
+        print(f"[init] train samples: {num_train_samples:,}"
+              + (f"  (target {args.train_samples:,})"
+                 if num_train_samples < args.train_samples else "  (target met)"))
+        print(f"[init] val samples:   {num_val_samples:,}"
+              + (f"  (target {args.val_samples:,})"
+                 if num_val_samples < args.val_samples else "  (target met)"))
+        # Loud warning if a filter is too aggressive for the data pool.
+        if num_train_samples < args.train_samples:
+            print(f"[init] WARNING: train pool yields only "
+                  f"{num_train_samples:,} < target {args.train_samples:,} "
+                  f"filtered plies. The filter is too aggressive for the "
+                  f"available data — add more data or relax the filter for a "
+                  f"constant-size comparison.")
+        if num_val_samples < args.val_samples:
+            print(f"[init] WARNING: val pool yields only "
+                  f"{num_val_samples:,} < target {args.val_samples:,}.")
+        if expected_epochs is not None:
+            print(
+                f"[init] expected epochs: {expected_epochs:.3f}  "
+                f"(= max_steps {args.max_steps} * batch {args.batch_size} "
+                f"/ {num_train_samples:,} train samples)"
+            )
+        else:
+            print("[init] expected epochs: n/a (0 train samples after filter)")
+    else:
+        print("[init] sample counting skipped (--no-count-samples)")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -349,6 +444,11 @@ def train(args: argparse.Namespace) -> None:
 
     config_dict = vars(args).copy()
     config_dict["params"] = n_params
+    config_dict["n_train_games"] = n_train_files
+    config_dict["n_val_games"] = n_val_files
+    config_dict["num_train_samples"] = num_train_samples
+    config_dict["num_val_samples"] = num_val_samples
+    config_dict["expected_epochs"] = expected_epochs
     (out_dir / "config.json").write_text(json.dumps(config_dict, indent=2))
     print(f"[init] output_dir={out_dir}  log={log_path.name}")
 
@@ -543,6 +643,32 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "truer 'endgame' selector). Default None keeps "
                         "everything. Combine with --turn-start to keep a "
                         "mid-to-end window.")
+    p.add_argument("--count-samples", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="at init, count train/val samples (honoring the "
+                        "game-phase filters) and report expected epochs; "
+                        "results are saved to config.json. Near-instant "
+                        "without --max-plies-left; a full data pass with it. "
+                        "Use --no-count-samples to skip.")
+
+    # Pooled random split over ALL games under --data-root. A fixed budget of
+    # FILTERED plies is drawn for each split, constant across turn_start /
+    # max_plies_left (capped during iteration). Games are split disjointly
+    # (no leakage) with --split-seed; --data-seed fixes the position order.
+    p.add_argument("--data-root", default=RAW_DATA_ROOT,
+                   help="root folder containing all .gz games (any sub-folder "
+                        "names); pooled and split into train/val.")
+    p.add_argument("--train-samples", type=int, default=TRAIN_SAMPLES,
+                   help="target number of FILTERED training plies (cap).")
+    p.add_argument("--val-samples", type=int, default=VAL_SAMPLES,
+                   help="target number of FILTERED validation plies (cap).")
+    p.add_argument("--split-seed", type=int, default=SPLIT_SEED,
+                   help="seed for the game-level train/val partition (fixed "
+                        "so val games + train pool are stable across runs and "
+                        "filters).")
+    p.add_argument("--data-seed", type=int, default=DATA_SEED,
+                   help="seed for the per-position shuffle buffer (fixed so "
+                        "the data order is identical across model runs).")
 
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     p.add_argument("--device", default=default_device)
