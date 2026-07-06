@@ -42,12 +42,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from symmetry.group import GCHESS_GROUP, GChess, GroupDef
+from symmetry.group import FLIPGROUP_GROUP, GCHESS_GROUP, GChess, GroupDef
 
 from .gcnn import GROUP_SIZE, GBatchNorm, GConv, GSELayer
 from .policy_map import (
     POLICY_INDEX_SIZE,
     POLICY_NUM_CHANNELS,
+    build_flipgroup_az_policy_gather,
     build_flipgroup_orbit_policy_gather,
     build_orbit_policy_gather,
     build_policy_gather_indices,
@@ -237,6 +238,73 @@ class EquivariantPolicyHead(nn.Module):
         return gathered.view(b, POLICY_INDEX_SIZE, 2).mean(dim=2)     # (B, 1858)
 
 
+class FlipGroupAZPolicyHead(nn.Module):
+    """sigma_h-equivariant policy head that KEEPS the lc0 AZ 80-channel
+    spatial layout (the "fgcnn2" head).
+
+    Same conv stack as EquivariantPolicyHead, different readout:
+
+        GConv(F, F, 3x3)  -> GBN -> ReLU
+        GConv(F, 80, 3x3) -> GBN -> ReLU        # (B, 80 * 2, 8, 8) folded
+        AZ gather over BOTH fibers -> (B, 1858, 2) -> sum -> (B, 1858)
+
+    Readout field: z(c) = y[c, e-fiber] + y[m(c), h-fiber], where m is
+    the direction-mirror permutation of the AZ channels (N<->N, NE<->NW,
+    E<->W, ...; see policy_map.build_az_channel_mirror). No group-sum,
+    no orbit re-housing: logit i is read at move i's canonical AZ cell
+    (channel = move type/direction, spatial position = from-square),
+    exactly like the baseline head.
+
+    Why equivariant: under sigma_h the folded FlipGroup signal satisfies
+    y'[c, e](u) = y[c, h](s u) and y'[c, h](u) = y[c, e](s u), so
+    z'(c)(u) = z(m(c))(s u) — the direction-permuted AZ transformation —
+    and the AZ cell of the file-mirrored move perm_h[i] is exactly
+    (m(c_i), s u_i). Full derivation + build-time verification of that
+    identity live in models/policy_map.py.
+
+    Compared to the orbit-gather head this uses 73/80 channels (vs
+    30/80) and preserves the conv's from-square spatial semantics, so
+    baseline-vs-fgcnn2 isolates the equivariance constraint itself.
+
+    FlipGroup-only: the construction relies on sigma_h having no rank
+    component; groups containing sigma_c are rejected (their promo rows
+    have no mirror row in the AZ grid — use EquivariantPolicyHead).
+    """
+
+    POLICY_NUM_CHANNELS = POLICY_NUM_CHANNELS  # 80
+
+    def __init__(self, filters: int, group: GroupDef = FLIPGROUP_GROUP):
+        super().__init__()
+        if group.name != "flipgroup":
+            raise ValueError(
+                f"FlipGroupAZPolicyHead requires FLIPGROUP_GROUP, got "
+                f"{group.name!r} — the AZ layout is only sigma_h-mirrorable."
+            )
+        self.group = group
+        self.filters = filters
+        self.conv1 = GConv(filters, filters, 3, padding=1, bias=True, group=group)
+        self.bn1 = GBatchNorm(filters, group=group)
+        self.conv2 = GConv(
+            filters, self.POLICY_NUM_CHANNELS, 3, padding=1, bias=True, group=group
+        )
+        self.bn2 = GBatchNorm(self.POLICY_NUM_CHANNELS, group=group)
+        self.register_buffer(
+            "policy_gather", build_flipgroup_az_policy_gather(), persistent=False
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, F * 2, 8, 8) — folded FlipGroup signal from the body
+        x = F.relu(self.bn1(self.conv1(x)))     # (B, F * 2, 8, 8)
+        x = F.relu(self.bn2(self.conv2(x)))     # (B, 80 * 2, 8, 8)
+        b = x.shape[0]
+        flat = x.reshape(b, self.POLICY_NUM_CHANNELS * self.group.order * 64)
+        gathered = flat.index_select(1, self.policy_gather.view(-1))  # (B, 1858*2)
+        # Column 0 = e-fiber at the move's AZ cell; column 1 = h-fiber of
+        # the direction-mirrored channel at the same cell. Their sum is the
+        # sigma_h-equivariant readout field z (see class docstring).
+        return gathered.view(b, POLICY_INDEX_SIZE, 2).sum(dim=2)  # (B, 1858)
+
+
 class EquivariantValueHead(nn.Module):
     """G-equivariant value head producing (B, 3) softmax [W, D, L].
 
@@ -420,6 +488,7 @@ __all__ = [
     "BaselineValueHead",
     "BaselineMovesLeftHead",
     "EquivariantPolicyHead",
+    "FlipGroupAZPolicyHead",
     "EquivariantValueHead",
     "InvariantMovesLeftHead",
 ]

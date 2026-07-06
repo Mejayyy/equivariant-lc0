@@ -420,9 +420,10 @@ def test_plot_load_log_backward_compat_legacy_schema(tmp_path):
 
 def test_trainer_model_names_include_sgcnn():
     assert "sgcnn" in MODEL_NAMES
-    # The four trainable variants: baseline + the three equivariant models
-    # (full G_chess, SG_chess sigma_c, FlipGroup sigma_h).
-    assert set(MODEL_NAMES) == {"baseline", "gcnn", "sgcnn", "fgcnn"}
+    # The five trainable variants: baseline + the equivariant models
+    # (full G_chess, SG_chess sigma_c, FlipGroup sigma_h with the orbit
+    # policy head, FlipGroup sigma_h with the AZ policy head).
+    assert set(MODEL_NAMES) == {"baseline", "gcnn", "sgcnn", "fgcnn", "fgcnn2"}
 
 
 def test_trainer_cli_accepts_sgcnn():

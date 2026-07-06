@@ -584,7 +584,7 @@ def test_fgcnn_param_count_matches_sgcnn_order():
 
 def test_trainer_model_names_include_fgcnn():
     assert "fgcnn" in MODEL_NAMES
-    assert set(MODEL_NAMES) == {"baseline", "gcnn", "sgcnn", "fgcnn"}
+    assert set(MODEL_NAMES) == {"baseline", "gcnn", "sgcnn", "fgcnn", "fgcnn2"}
 
 
 def test_trainer_cli_accepts_fgcnn():

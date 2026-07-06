@@ -636,6 +636,167 @@ def build_flipgroup_orbit_policy_gather(
     return gather
 
 
+# ---------------------------------------------------------------------------
+# FlipGroup AZ-style gather (used by FlipGroupAZPolicyHead — the "fgcnn2"
+# policy head).
+# ---------------------------------------------------------------------------
+#
+# Motivation. The orbit-based gathers above are equivariant but place each
+# move-orbit at an ARBITRARY (channel, cell) position unrelated to the
+# move's actual squares — the conv's spatial semantics ("cell (r, f) =
+# move from square (r, f)") are lost, and only ~30 of the 80 channels are
+# used. For FlipGroup specifically that sacrifice is unnecessary: the
+# lc0 AZ 80-channel layout maps onto itself under a file mirror, provided
+# the DIRECTION channels are permuted along with the spatial flip:
+#
+#     queen dirs:   N<->N, NE<->NW, E<->W, SE<->SW, S<->S
+#     knight dirs:  (dc, dr) -> (-dc, dr)  (e.g. the g1f3 slot <-> the
+#                   b1c3 slot)
+#     promo dirs:   NW<->NE, N<->N  (same promotion piece)
+#
+# `build_az_channel_mirror()` derives this permutation m(c) from the move
+# list itself (no hand-coded table): for every legal cell (c, r, f) with
+# move u, the file-mirrored move must live at (m(c), r, 7-f) for one
+# consistent m(c) per channel. m is verified to be a self-inverse
+# permutation, and unused padding channels map to themselves.
+#
+# Head construction (see models/heads.py: FlipGroupAZPolicyHead). The
+# policy conv stack outputs a folded FlipGroup signal y with 80 logical
+# channels x 2 fibers (e, sigma_h), layout index = c*2 + g. Under the
+# sigma_h input action the fibers swap and space file-flips:
+#
+#     y'[c, e](u) = y[c, h](s u),     y'[c, h](u) = y[c, e](s u)
+#
+# Define the readout field  z(c)(u) = y[c, e](u) + y[m(c), h](u)
+# (NO spatial flip in the readout). Then:
+#
+#     z'(c)(u) = y[c, h](s u) + y[m(c), e](s u) = z(m(c))(s u)
+#
+# i.e. z transforms exactly as the direction-permuted AZ field. Gathering
+# z at move i's canonical AZ cell (c_i, u_i) therefore satisfies
+#
+#     f(sigma_h x)[i] = z(m(c_i))(s u_i) = f(x)[perm_h[i]]
+#
+# because the AZ cell of the file-mirrored move perm_h[i] is exactly
+# (m(c_i), s u_i) — an identity that `build_flipgroup_az_policy_gather`
+# verifies for all 1858 moves at build time.
+#
+# Compared to the orbit gather this head uses all 73 real AZ channels
+# (only the 7 padding channels are dead, same as the baseline head) and
+# keeps the baseline's from-square spatial semantics, so the ONLY
+# difference between the baseline policy head and this one is the
+# equivariance constraint itself.
+
+
+def _mirror_uci_file(uci: str) -> str:
+    """File-mirror a UCI move string (a<->h, b<->g, ...); ranks and any
+    promotion piece are unchanged."""
+
+    def _flip_sq(sq: str) -> str:
+        return chr(ord("a") + 7 - (ord(sq[0]) - ord("a"))) + sq[1]
+
+    return _flip_sq(uci[:2]) + _flip_sq(uci[2:4]) + uci[4:]
+
+
+def build_az_channel_mirror() -> List[int]:
+    """Derive the direction-mirror permutation ``m`` of the 80 AZ policy
+    channels under sigma_h (file flip).
+
+    Returns a list of 80 ints with ``m[m[c]] == c`` for all c. For every
+    legal cell ``(c, r, f)`` of the AZ grid holding move ``u``, the
+    file-mirrored move lives at ``(m[c], r, 7 - f)``; this consistency is
+    checked for every one of the 5120 cells. The 7 unused padding
+    channels (73..79) map to themselves.
+    """
+    move_list = _build_move_list_5120()
+    uci_to_flat = {u: i for i, u in enumerate(move_list) if u != "illegal"}
+
+    mirror: List[int] = [-1] * POLICY_NUM_CHANNELS
+    for flat, uci in enumerate(move_list):
+        if uci == "illegal":
+            continue
+        chan, sq = flat // 64, flat % 64
+        r, f = sq // 8, sq % 8
+        mirrored_uci = _mirror_uci_file(uci)
+        m_flat = uci_to_flat.get(mirrored_uci)
+        if m_flat is None:
+            raise RuntimeError(
+                f"file-mirror of AZ move {uci!r} ({mirrored_uci!r}) is not "
+                f"in the AZ grid — layout assumption broken"
+            )
+        m_chan, m_sq = m_flat // 64, m_flat % 64
+        if m_sq != r * 8 + (7 - f):
+            raise RuntimeError(
+                f"mirrored move {mirrored_uci!r} not at the mirrored cell: "
+                f"expected sq {r * 8 + (7 - f)}, got {m_sq}"
+            )
+        if mirror[chan] == -1:
+            mirror[chan] = m_chan
+        elif mirror[chan] != m_chan:
+            raise RuntimeError(
+                f"channel {chan} mirrors inconsistently: {mirror[chan]} vs "
+                f"{m_chan} (at move {uci!r})"
+            )
+
+    for chan in range(POLICY_NUM_CHANNELS):
+        if mirror[chan] == -1:  # padding channels 73..79
+            mirror[chan] = chan
+
+    for chan in range(POLICY_NUM_CHANNELS):
+        if mirror[mirror[chan]] != chan:
+            raise RuntimeError(
+                f"AZ channel mirror is not an involution at channel {chan}"
+            )
+    return mirror
+
+
+def build_flipgroup_az_policy_gather() -> torch.Tensor:
+    """Build the ``(1858, 2)`` gather for ``FlipGroupAZPolicyHead``.
+
+    Indices point into the FOLDED FlipGroup policy tensor
+    ``(B, 80 * 2, 8, 8)`` viewed flat as ``(B, 80 * 2 * 64)``, with the
+    c-major fiber layout ``folded_channel = c * 2 + g`` (g = 0 for the
+    identity fiber, 1 for the sigma_h fiber). For move ``i`` at AZ cell
+    ``(c, sq)``:
+
+        gather[i, 0] = (c    * 2 + 0) * 64 + sq   # fiber e, channel c
+        gather[i, 1] = (m(c) * 2 + 1) * 64 + sq   # fiber h, mirrored chan
+
+    and the head reads ``logits[i] = flat[gather[i, 0]] + flat[gather[i, 1]]``
+    (a ``.sum(dim=2)`` after the 2-column index_select). See the section
+    comment above for the equivariance derivation; the defining identity
+    "AZ cell of perm_h[i] == (m(c_i), r_i, 7 - f_i)" is asserted here for
+    every move.
+    """
+    from symmetry.actions import build_policy_permutation
+    from symmetry.group import GChess
+
+    az = build_policy_gather_indices()  # (1858,) flat into 80*64
+    mirror = build_az_channel_mirror()
+    perm_h = build_policy_permutation(GChess.SIGMA_H).tolist()
+
+    order = 2  # |FlipGroup|
+    gather = torch.empty(POLICY_INDEX_SIZE, 2, dtype=torch.int64)
+    for i in range(POLICY_INDEX_SIZE):
+        flat = int(az[i])
+        chan, sq = flat // 64, flat % 64
+        r, f = sq // 8, sq % 8
+        # The gather-level equivariance identity (see section comment).
+        expected_mirror_flat = mirror[chan] * 64 + r * 8 + (7 - f)
+        if int(az[perm_h[i]]) != expected_mirror_flat:
+            raise RuntimeError(
+                f"AZ mirror identity violated at move {i} "
+                f"({POLICY_INDEX_TO_UCI[i]!r}): perm_h cell "
+                f"{int(az[perm_h[i]])} != {expected_mirror_flat}"
+            )
+        gather[i, 0] = (chan * order + 0) * 64 + sq
+        gather[i, 1] = (mirror[chan] * order + 1) * 64 + sq
+
+    if int(gather.min()) < 0 or int(gather.max()) >= POLICY_NUM_CHANNELS * order * 64:
+        raise RuntimeError("FlipGroup AZ gather entry out of range")
+    return gather
+
+
 __all__ = [
     "POLICY_INDEX_SIZE",
     "POLICY_NUM_CHANNELS",
@@ -651,4 +812,6 @@ __all__ = [
     "build_orbit_policy_gather",
     "build_sgchess_orbit_policy_gather",
     "build_flipgroup_orbit_policy_gather",
+    "build_az_channel_mirror",
+    "build_flipgroup_az_policy_gather",
 ]

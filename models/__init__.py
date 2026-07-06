@@ -22,6 +22,7 @@ from .heads import (
     BaselineValueHead,
     EquivariantPolicyHead,
     EquivariantValueHead,
+    FlipGroupAZPolicyHead,
     InvariantMovesLeftHead,
 )
 from .policy_map import (
@@ -31,7 +32,9 @@ from .policy_map import (
     POLICY_INDEX_TO_UCI,
     POLICY_NUM_CHANNELS,
     UCI_TO_POLICY_INDEX,
+    build_az_channel_mirror,
     build_flat_to_policy_index,
+    build_flipgroup_az_policy_gather,
     build_flipgroup_orbit_policy_gather,
     build_orbit_policy_gather,
     build_policy_gather_indices,
@@ -55,6 +58,8 @@ __all__ = [
     "build_orbit_policy_gather",
     "build_sgchess_orbit_policy_gather",
     "build_flipgroup_orbit_policy_gather",
+    "build_az_channel_mirror",
+    "build_flipgroup_az_policy_gather",
     # baseline
     "BaselineLCZero",
     "BaselineBody",
@@ -82,6 +87,7 @@ __all__ = [
     "GCNNChess",
     # equivariant heads
     "EquivariantPolicyHead",
+    "FlipGroupAZPolicyHead",
     "EquivariantValueHead",
     "InvariantMovesLeftHead",
 ]

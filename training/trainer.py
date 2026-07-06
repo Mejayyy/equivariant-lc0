@@ -4,7 +4,7 @@
 Usage (CLI)::
 
     python -m training.trainer \\
-        --model {baseline,gcnn,sgcnn,fgcnn} \\
+        --model {baseline,gcnn,sgcnn,fgcnn,fgcnn2} \\
         --blocks 10 --filters 128 \\
         --batch-size 256 --lr 1e-3 \\
         --max-steps 10000 \\
@@ -22,6 +22,8 @@ Model variants:
   body parameters of ``gcnn`` at matched (blocks, filters).
 - ``fgcnn``    — ``GCNNChess(group=FLIPGROUP_GROUP)``: FlipGroup =
   {e, sigma_h} subgroup (file flip) equivariance only. |G| = 2.
+- ``fgcnn2``   — ``fgcnn`` with the AZ-layout policy head
+  (``policy_head_style="az"``); identical parameter count.
 
 Pools all `.gz` games under `--data-root` (default `RAW_DATA_ROOT`) and
 splits them disjointly into train/val at the game level (see
@@ -69,7 +71,7 @@ from models import (
 from .losses import combined_loss
 
 
-MODEL_NAMES = ("baseline", "gcnn", "sgcnn", "fgcnn")
+MODEL_NAMES = ("baseline", "gcnn", "sgcnn", "fgcnn", "fgcnn2")
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +89,9 @@ def build_model(
 ) -> nn.Module:
     """Build one of: ``baseline``, ``gcnn`` (full G_chess), ``sgcnn``
     (SG_chess subgroup, sigma_c only), ``fgcnn`` (FlipGroup subgroup,
-    sigma_h only)."""
+    sigma_h only, orbit-gather policy head), ``fgcnn2`` (FlipGroup like
+    fgcnn but with the AZ-layout sigma_h-equivariant policy head —
+    same body/value/mlh heads, only the policy readout differs)."""
     if name == "baseline":
         return BaselineLCZero(
             blocks=blocks,
@@ -122,6 +126,16 @@ def build_model(
             mlh_channels=mlh_channels,
             fc_size=fc_size,
             group=FLIPGROUP_GROUP,
+        )
+    if name == "fgcnn2":
+        return GCNNChess(
+            blocks=blocks,
+            filters=filters,
+            se_channels=se_channels,
+            mlh_channels=mlh_channels,
+            fc_size=fc_size,
+            group=FLIPGROUP_GROUP,
+            policy_head_style="az",
         )
     raise ValueError(
         f"unknown model: {name}; expected one of {MODEL_NAMES}"
@@ -604,7 +618,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Train BaselineLCZero or a group-equivariant GCNNChess "
-            "(gcnn / sgcnn / fgcnn) on LCZero V6 data."
+            "(gcnn / sgcnn / fgcnn / fgcnn2) on LCZero V6 data."
         )
     )
     p.add_argument("--model", choices=list(MODEL_NAMES), required=True)
@@ -692,21 +706,23 @@ if __name__ == "__main__":
 """
 python -m training.trainer `
     --model baseline `
-    --blocks 5 `
+    --blocks 10 `
     --filters 128 `
     --se-channels 32 `
     --mlh-channels 8 `
     --fc-size 128 `
-    --batch-size 512 `
+    --batch-size 256 `
     --lr 5e-4 `
     --weight-decay 5e-4 `
-    --max-steps 10000 `
-    --log-every 500 `
-    --val-every 500 `
-    --val-batches 500 `
-    --checkpoint-every 10000 `
+    --max-steps 84000 `
+    --log-every 4000 `
+    --val-every 7000 `
+    --val-batches 2000 `
+    --checkpoint-every 42000 `
     --num-workers 0 `
+    --turn-start 40 `
+    --max-plies-left 160`
     --device cuda `
     --seed 0 `
-    --output-dir runs/1_cuda_baseline
+    --output-dir runs/baseline_start_40_end_160
 """

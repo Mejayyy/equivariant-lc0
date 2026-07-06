@@ -277,23 +277,27 @@ def _random_targets(batch_size: int, seed: int) -> dict:
 
 
 @pytest.mark.parametrize(
-    "group, metric, error_keys",
+    "group, metric, error_keys, model_kwargs",
     [
         pytest.param(
             GCHESS_GROUP, equivariance_error,
-            ("sigma_h", "sigma_c", "sigma_h_c"), id="gcnn",
+            ("sigma_h", "sigma_c", "sigma_h_c"), {}, id="gcnn",
         ),
         pytest.param(
             SGCHESS_GROUP, equivariance_error_sgchess,
-            ("sigma_c",), id="sgcnn",
+            ("sigma_c",), {}, id="sgcnn",
         ),
         pytest.param(
             FLIPGROUP_GROUP, equivariance_error_flipgroup,
-            ("sigma_h",), id="fgcnn",
+            ("sigma_h",), {}, id="fgcnn",
+        ),
+        pytest.param(
+            FLIPGROUP_GROUP, equivariance_error_flipgroup,
+            ("sigma_h",), {"policy_head_style": "az"}, id="fgcnn2",
         ),
     ],
 )
-def test_whole_model_equivariance_survives_sgd(group, metric, error_keys):
+def test_whole_model_equivariance_survives_sgd(group, metric, error_keys, model_kwargs):
     """Equivariance must hold (< 1e-5) not only at init but also after
     training. Five AdamW steps with the trainer's combined_loss
     (weight decay on, BN in train mode so running stats update), then
@@ -301,7 +305,7 @@ def test_whole_model_equivariance_survives_sgd(group, metric, error_keys):
     torch.manual_seed(0)
     model = GCNNChess(
         blocks=2, filters=16, se_channels=8, mlh_channels=8, fc_size=32,
-        group=group,
+        group=group, **model_kwargs,
     )
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
 

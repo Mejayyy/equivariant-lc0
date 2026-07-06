@@ -633,6 +633,18 @@ class GCNNChess(nn.Module):
       ``sigma_c`` / ``sigma_hc``. Note the value head here is fully
       INVARIANT (sigma_h does not swap W<->L), unlike the GChess /
       SGChess value heads.
+
+    ``policy_head_style`` selects the policy-head readout:
+
+    * ``"orbit"`` (default) — ``EquivariantPolicyHead``: group-sum +
+      orbit-based gather. Works for every supported group; the cell
+      assignment is unrelated to the moves' actual squares and only
+      ~30/80 channels are used.
+    * ``"az"`` — ``FlipGroupAZPolicyHead`` (the "fgcnn2" head):
+      keeps the lc0 AZ 80-channel spatial layout (cell = from-square,
+      channel = move direction/type) and achieves sigma_h-equivariance
+      via the direction-mirror channel permutation. FLIPGROUP_GROUP
+      only — groups containing sigma_c are rejected.
     """
 
     def __init__(
@@ -643,18 +655,30 @@ class GCNNChess(nn.Module):
         mlh_channels: int = 8,
         fc_size: int = 128,
         group: GroupDef = GCHESS_GROUP,
+        policy_head_style: str = "orbit",
     ):
         super().__init__()
         self.group = group
+        self.policy_head_style = policy_head_style
         self.body = GCNNBody(blocks, filters, se_channels, group=group)
         # Lazy import to break the gcnn <-> heads load-order cycle (heads
         # imports primitives from gcnn at module load).
         from .heads import (
             EquivariantPolicyHead,
             EquivariantValueHead,
+            FlipGroupAZPolicyHead,
             InvariantMovesLeftHead,
         )
-        self.policy_head = EquivariantPolicyHead(filters, group=group)
+        if policy_head_style == "orbit":
+            self.policy_head = EquivariantPolicyHead(filters, group=group)
+        elif policy_head_style == "az":
+            # FlipGroupAZPolicyHead itself validates group.name == "flipgroup".
+            self.policy_head = FlipGroupAZPolicyHead(filters, group=group)
+        else:
+            raise ValueError(
+                f"unknown policy_head_style {policy_head_style!r}; "
+                f"expected 'orbit' or 'az'"
+            )
         self.value_head = EquivariantValueHead(filters, group=group)
         self.moves_left_head = InvariantMovesLeftHead(
             filters, mlh_channels, fc_size, group=group
