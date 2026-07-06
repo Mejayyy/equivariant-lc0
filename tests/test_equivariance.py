@@ -4,8 +4,10 @@ all three non-identity elements of G_chess.
 Build a tiny GCNNChess (blocks=2, filters=32) and assert
 equivariance_error gives per-element errors well under 1e-5 across all
 three heads — i.e. the model is equivariant by construction at random
-init. (Training preserves this because every tied parameter is a single
-tensor and GBatchNorm shares its statistics across the group fiber.)
+init. Training preserves this, because every tied parameter is a single
+tensor and GBatchNorm shares its statistics across the group fiber;
+test_whole_model_equivariance_survives_sgd checks it after real
+optimiser steps.
 
 Also covers the SGChess-equivariant variant (``GCNNChess(group=
 SGCHESS_GROUP)``): the same model architecture parameterized by the
@@ -20,10 +22,12 @@ import torch
 
 from metrics.equivariance import (
     equivariance_error,
+    equivariance_error_flipgroup,
     equivariance_error_sgchess,
     sample_chess_input,
 )
-from models import GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
+from models import FLIPGROUP_GROUP, GCHESS_GROUP, GCNNChess, SGCHESS_GROUP
+from training.losses import combined_loss
 
 
 EQUIV_TOL = 1e-5
@@ -239,3 +243,91 @@ def test_sgcnn_chess_not_equivariant_under_sigma_h():
         f"SGChess model looks accidentally sigma_hc-equivariant: "
         f"{errors['sigma_h_c']:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Whole-model equivariance AFTER SGD steps (all three groups)
+# ---------------------------------------------------------------------------
+#
+# The init-time tests above cannot catch the training-time equivariance
+# hazards: parameters that must stay TIED during optimization (the value
+# head's shared wl_linear, GBatchNorm's per-logical-channel stats shared
+# across group fibers, the single LiftingConv/GConv base kernels). A
+# refactor that replaced any of those with per-fiber copies initialized
+# equal would pass every init-time test and silently lose equivariance
+# after the first optimizer step. So: train the full model for a few
+# AdamW steps with the REAL combined loss (all three heads receive
+# gradients, BN running stats move off their defaults), then re-assert
+# the group-appropriate equivariance error is still < 1e-5.
+
+
+def _random_targets(batch_size: int, seed: int) -> dict:
+    """Random supervised targets in the exact format the trainer feeds
+    combined_loss: policy with -1 illegal sentinels + a random legal
+    distribution, a WDL simplex, and a non-negative plies-left scalar."""
+    g = torch.Generator().manual_seed(seed)
+    policy = torch.full((batch_size, 1858), -1.0)
+    for i in range(batch_size):
+        legal = torch.randperm(1858, generator=g)[:40]
+        probs = torch.rand(40, generator=g)
+        policy[i, legal] = probs / probs.sum()
+    value = torch.softmax(torch.randn(batch_size, 3, generator=g), dim=-1)
+    mlh = torch.rand(batch_size, generator=g) * 100.0
+    return {"policy": policy, "value": value, "mlh": mlh}
+
+
+@pytest.mark.parametrize(
+    "group, metric, error_keys",
+    [
+        pytest.param(
+            GCHESS_GROUP, equivariance_error,
+            ("sigma_h", "sigma_c", "sigma_h_c"), id="gcnn",
+        ),
+        pytest.param(
+            SGCHESS_GROUP, equivariance_error_sgchess,
+            ("sigma_c",), id="sgcnn",
+        ),
+        pytest.param(
+            FLIPGROUP_GROUP, equivariance_error_flipgroup,
+            ("sigma_h",), id="fgcnn",
+        ),
+    ],
+)
+def test_whole_model_equivariance_survives_sgd(group, metric, error_keys):
+    """Equivariance must hold (< 1e-5) not only at init but also after
+    training. Five AdamW steps with the trainer's combined_loss
+    (weight decay on, BN in train mode so running stats update), then
+    the model must still be equivariant under its own group."""
+    torch.manual_seed(0)
+    model = GCNNChess(
+        blocks=2, filters=16, se_channels=8, mlh_channels=8, fc_size=32,
+        group=group,
+    )
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+
+    model.train()
+    for step in range(5):
+        x = sample_chess_input(batch_size=4)
+        targets = _random_targets(batch_size=4, seed=step)
+        losses = combined_loss(model(x), targets)
+        assert torch.isfinite(losses["total"]), f"loss NaN at step {step}"
+        opt.zero_grad(set_to_none=True)
+        losses["total"].backward()
+        opt.step()
+
+    # Every head must have actually received gradient during the steps
+    # (otherwise this test silently stops guarding that head).
+    for head_name in ("policy_head", "value_head", "moves_left_head"):
+        head = getattr(model, head_name)
+        got_grad = any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in head.parameters()
+        )
+        assert got_grad, f"{head_name} received no gradient — test is vacuous"
+
+    errors = metric(model, n_samples=8, device="cpu")
+    for key in error_keys:
+        assert errors[key] < EQUIV_TOL, (
+            f"{group.name}: equivariance broke after SGD — "
+            f"{key} error {errors[key]:.3e} >= {EQUIV_TOL:.0e}"
+        )
