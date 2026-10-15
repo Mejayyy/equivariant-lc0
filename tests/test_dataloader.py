@@ -1,10 +1,11 @@
-"""Phase 4: V6 parser, plane extraction, target extraction.
+"""V6 parser, plane extraction, target extraction, and the dataset.
 
-DOD (CLAUDE.md): round-trip parses 100 records from a real tar; targets in
-valid ranges (policy sums to ~1, WDL sums to 1, MLH >= 0).
+Round-trips 100 real records; targets must be in valid ranges (policy
+sums to ~1, WDL sums to 1, MLH >= 0).
 
 Uses real V6 .gz files at raw_data/chunck_set_1/ — these are not bundled
-in the repo, so the tests are skipped when absent.
+in the repo (fetch them with scripts/download_data.py), so the tests are
+skipped when absent.
 """
 
 import gzip
@@ -80,7 +81,7 @@ def test_only_input_format_1_for_dataset():
 
 
 # ---------------------------------------------------------------------------
-# Target-extraction round-trip — Phase 4 DOD
+# Target-extraction round-trip
 # ---------------------------------------------------------------------------
 
 
@@ -232,20 +233,23 @@ def test_first_record_of_each_chunk_is_starting_position():
 
 @skip_no_data
 def test_dataset_includes_chess960():
-    """Sanity-flag: this dataset has at least one Chess960 starting position
-    among the first 5 chunks. Removing this test means we believe all games
-    are standard chess; if FRC support matters elsewhere, keep it."""
+    """The data contains Chess960 (Fischer-random) games: at least one of
+    the first 5 games starts from a non-standard back rank. This is why
+    the sanity check builds boards in chess960 mode and the starting-
+    position test above only checks piece counts on each back rank."""
+    standard_back_rank = {1: [1, 6], 2: [2, 5], 3: [0, 7], 4: [3], 5: [4]}
     files = sorted(REAL_DATA_DIR.glob("*.gz"))[:5]
     found_frc = False
     for f in files:
-        rec = next(iter_v6_records_from_file(f))
-        planes = v6_to_34_planes(rec)
-        if planes[5, 0, 4] != 1.0:  # us-king not on e1 -> non-standard start
+        planes = v6_to_34_planes(next(iter_v6_records_from_file(f)))
+        back_rank = {
+            ch: sorted(np.nonzero(planes[ch, 0])[0].tolist())
+            for ch in standard_back_rank
+        }
+        if back_rank != standard_back_rank:
             found_frc = True
             break
-    # Not asserting found_frc — just record observation. If always False,
-    # this dataset is pure standard chess.
-    assert found_frc or not found_frc  # always passes; documents the search
+    assert found_frc, "expected a Chess960 start among the first 5 games"
 
 
 # ---------------------------------------------------------------------------
@@ -276,13 +280,13 @@ def test_bitboard_repetition_plane():
 
 
 # ---------------------------------------------------------------------------
-# Phase 5: LCZeroV6Dataset
+# LCZeroV6Dataset
 # ---------------------------------------------------------------------------
 
 
 @skip_no_data
 def test_dataset_yields_correct_shapes():
-    """Phase 5 DOD: Dataset yields correct shapes from a single chunk file."""
+    """Dataset yields correct shapes from a single chunk file."""
     ds = LCZeroV6Dataset(folders=[REAL_DATA_DIR], shuffle_buffer=0)
     it = iter(ds)
     samples = [next(it) for _ in range(5)]
