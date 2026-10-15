@@ -35,6 +35,9 @@ SERIES = {
     "sgcnn": ("#e87ba4", "#d55181", "v"),
 }
 
+# Triangles and diamonds look smaller than circles/squares at equal size.
+MARKER_SCALE = {"^": 1.3, "v": 1.3, "D": 0.9}
+
 THEMES = {
     "light": dict(surface="#fcfcfb", primary="#0b0b0b", secondary="#52514e",
                   muted="#898781", grid="#e1e0d9", axis="#c3c2b7"),
@@ -144,7 +147,8 @@ def plot(runs: List[Dict], metric: str, facet: Optional[str], theme: str,
             # final evaluation and doubles as a non-colour identity cue.
             ax.plot(xs, ys, color=color, linewidth=2 * PX,
                     solid_joinstyle="round", solid_capstyle="round",
-                    marker=marker, markevery=[len(xs) - 1], markersize=8 * PX,
+                    marker=marker, markevery=[len(xs) - 1],
+                    markersize=8 * PX * MARKER_SCALE.get(marker, 1.0),
                     markerfacecolor=color, markeredgecolor=t["surface"],
                     markeredgewidth=2 * PX, label=model, zorder=3)
             if model not in models_present:
@@ -166,7 +170,8 @@ def plot(runs: List[Dict], metric: str, facet: Optional[str], theme: str,
         light, dark, marker = SERIES.get(model, ("#6250d6", "#9085e9", "P"))
         color = light if theme == "light" else dark
         handles.append(Line2D([], [], color=color, linewidth=2 * PX, marker=marker,
-                              markersize=8 * PX, markeredgewidth=0))
+                              markersize=8 * PX * MARKER_SCALE.get(marker, 1.0),
+                              markeredgewidth=0))
         labels.append(model)
     legend = fig.legend(handles, labels, loc="upper right", ncol=len(labels),
                         frameon=False, bbox_to_anchor=(0.995, 0.995),
