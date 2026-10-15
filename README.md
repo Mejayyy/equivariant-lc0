@@ -18,12 +18,12 @@ no self-play).
 
 **Branches**
 
-- `main` — the thesis implementation: the baseline plus three equivariant
-  variants.
-- [`fgcnn2-az-policy-head`](../../tree/fgcnn2-az-policy-head) — follow-up
-  work: a redesigned policy head for the file-mirror model that keeps
-  LCZero's spatial move layout and closes most of the policy-loss gap
-  reported below.
+- [`main`](../../tree/main) — the thesis implementation: the baseline plus
+  three equivariant variants.
+- `fgcnn2-az-policy-head` (**this branch**) — follow-up work: `fgcnn2`, a
+  redesigned policy head for the file-mirror model that keeps LCZero's
+  spatial move layout and closes 94% of its policy-loss gap to the
+  baseline ([details](#this-branch-fgcnn2)).
 
 ## Highlights
 
@@ -44,9 +44,10 @@ no self-play).
   encoder, FEN sanity check (60/60 top-3 target moves legal), game-level
   train/validation split, game-phase filters, sample counting from gzip
   trailers without decompression.
-- **353 tests:** bit-exact invertibility of every group action, per-layer,
-  per-head and end-to-end equivariance, BN-folding round trips, real-data
-  round trips, offline tests of the data downloader.
+- **388 tests:** bit-exact invertibility of every group action, per-layer,
+  per-head and end-to-end equivariance (at initialisation and after
+  optimiser steps), BN-folding round trips, real-data round trips, offline
+  tests of the data downloader.
 
 ## The symmetry group
 
@@ -69,6 +70,7 @@ model-agnostic:
 | `gcnn` | `GCNNChess(group=GCHESS_GROUP)` | G_chess | 4 | 14.5 M |
 | `sgcnn` | `GCNNChess(group=SGCHESS_GROUP)` | {e, σ_c} | 2 | 7.29 M |
 | `fgcnn` | `GCNNChess(group=FLIPGROUP_GROUP)` | {e, σ_h} | 2 | 7.29 M |
+| `fgcnn2` | `GCNNChess(group=FLIPGROUP_GROUP, policy_head_style="az")` | {e, σ_h} | 2 | 7.29 M |
 
 The G-CNN keeps the LCZero macro-architecture (input convolution, SE
 residual tower, three heads) and replaces every layer with its equivariant
@@ -110,8 +112,7 @@ Final validation losses (total = policy + value + 0.01 × moves-left):
 - The policy gap comes from the equivariant policy head rather than the
   body. To be equivariant it pools over the group axis and reads each
   move's logit from an orbit-assigned cell unrelated to the move's
-  squares, using 30 of its 80 output channels. The
-  [`fgcnn2-az-policy-head`](../../tree/fgcnn2-az-policy-head) branch
+  squares, using 30 of its 80 output channels. [`fgcnn2`](#this-branch-fgcnn2)
   replaces it with an equivariant head that keeps LCZero's
   (from-square, move-direction) layout.
 
@@ -125,6 +126,63 @@ regenerate the table and figure with
 python scripts/compare_runs.py results/baseline_start_* results/fgcnn_start_* \
     --metric policy --facet turn_start --out docs/figures/val_policy_by_turn_start
 ```
+
+## This branch: fgcnn2
+
+`fgcnn` pays for exact equivariance in its policy head: it pools over the
+group axis and reads each move's logit from an orbit-assigned cell,
+discarding LCZero's spatial move layout (cell = from-square, channel = move
+direction) and leaving 50 of the 80 output channels unused.
+
+Under the file mirror that sacrifice is unnecessary. Mirroring the board
+maps LCZero's 80-channel move layout onto itself, provided the direction
+channels are permuted as well: NE ↔ NW, E ↔ W, knight (dc, dr) → (−dc, dr),
+promotion NW ↔ NE. `FlipGroupAZPolicyHead` keeps the layout and reads move
+*i* at its usual cell, from both group fibers:
+
+```
+z(c) = y[c, e] + y[m(c), σ_h]        m = direction-mirror permutation of the channels
+```
+
+Under σ_h this field transforms exactly like the mirrored move layout, so
+the head is equivariant by construction (σ_h error ~1e-7 at
+initialisation, 3e-7 after 42k training steps); the permutation m is
+derived from the move list and verified when the head is built. Only a
+fixed gather table changes, so `fgcnn2` has exactly the same parameters as
+`fgcnn` and the same spatial semantics as the baseline, which makes it the
+cleanest comparison: the only remaining difference is the equivariance
+constraint.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/val_policy_fgcnn2-dark.png">
+  <img alt="Validation policy loss vs. training step at turn_start 0 for baseline, fgcnn and fgcnn2 over the first 70k steps. fgcnn2 tracks the baseline closely (2.245 vs. 2.233), while fgcnn stays well above (2.441)." src="docs/figures/val_policy_fgcnn2-light.png">
+</picture>
+
+| Model | Step | Policy | Value | Moves left (plies) | Total |
+|---|---:|---:|---:|---:|---:|
+| baseline | 64k | **2.233** | 0.642 | 52.0 | **3.395** |
+| fgcnn | 70k | 2.441 | 0.660 | **50.1** | 3.602 |
+| fgcnn2 | 70k | 2.245 | **0.641** | 51.3 | 3.400 |
+
+- The new head removes **94%** of fgcnn's policy-loss gap to the baseline
+  (2.441 → 2.245; baseline 2.233) at identical parameter count, and brings
+  the total validation loss level with the baseline (3.400 vs. 3.395).
+- The fgcnn2 run stopped at 70k of its planned 84k steps, so the table
+  compares each run's last evaluation at or before 70k. fgcnn2 trained on
+  the pooled game-level split, while the `turn_start = 0` baseline and
+  fgcnn runs used the earlier split by archive. Both validate on held-out
+  games from the same LCZero run, so the comparison is indicative rather
+  than exact.
+
+```bash
+python scripts/compare_runs.py results/baseline_start_0 results/fgcnn_start_0 \
+    results/fgcnn2_start_0 --metric policy --max-step 70000 --out docs/figures/val_policy_fgcnn2
+```
+
+Also on this branch: `test_whole_model_equivariance_survives_sgd` trains
+every equivariant model for a few AdamW steps with the real loss and
+re-checks equivariance, guarding the weight sharing (such as the value
+head's single W/L readout) that tests at initialisation cannot.
 
 ## Design notes and limitations
 
@@ -182,7 +240,8 @@ python -m training.trainer --model fgcnn --blocks 10 --filters 88 \
     --val-every 7000 --val-batches 2000 --output-dir runs/fgcnn_start_0
 ```
 
-The output directory receives `config.json`, a JSON-lines log, checkpoints
+`--model` is one of `baseline`, `gcnn`, `sgcnn`, `fgcnn`, `fgcnn2`. The
+output directory receives `config.json`, a JSON-lines log, checkpoints
 and loss-curve plots. `--turn-start N` and `--max-plies-left K` restrict
 training and validation to a game phase; `python -m training.plot <run>`
 redraws a run's curves and `scripts/compare_runs.py` compares runs.
