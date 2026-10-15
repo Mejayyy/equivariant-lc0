@@ -1,8 +1,5 @@
-"""Phase 7: G-CNN primitives — shape + per-layer equivariance tests.
-
-DOD (CLAUDE.md):
-> per-layer shape tests + per-layer equivariance: each primitive in
-> isolation has equivariance error < 1e-5
+"""G-CNN primitives — shape + per-layer equivariance tests: each
+primitive in isolation must have equivariance error < 1e-5.
 
 Equivariance is checked AT INIT (no training). With Kaiming-init kernels
 and default BN running stats, every primitive in this file is equivariant

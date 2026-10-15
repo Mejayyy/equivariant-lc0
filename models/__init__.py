@@ -76,11 +76,11 @@ __all__ = [
     "GSELayer",
     "regular_rep_perm",
     "group_action_g_signal",
-    # gcnn model (Phase 8)
+    # gcnn model
     "GResBlock",
     "GCNNBody",
     "GCNNChess",
-    # equivariant heads (Phase 8)
+    # equivariant heads
     "EquivariantPolicyHead",
     "EquivariantValueHead",
     "InvariantMovesLeftHead",

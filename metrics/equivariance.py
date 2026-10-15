@@ -1,31 +1,28 @@
-"""Equivariance error metric for evaluating G_chess- (and SG_chess-)
-equivariant models.
+"""Equivariance error metric for the G_chess-equivariant model and its
+subgroup variants.
 
 For a 3-headed model ``model(x) -> (policy, value, mlh)``, computes the
 relative-Frobenius deviation between ``f(g . x)`` and ``g . f(x)`` per
 head, averaged across heads and samples, for each non-identity g in
 the chosen group.
 
-Two APIs:
+One API per group:
 
     equivariance_error(model, n_samples=64, device='cpu') -> {
         "sigma_h": ..., "sigma_c": ..., "sigma_h_c": ..., "overall_mean": ...,
-    }
+    }                                   # full G_chess    -> gcnn
 
-    equivariance_error_sgchess(model, n_samples=64, device='cpu') -> {
-        "sigma_c": ..., "overall_mean": ...,
-    }
+    equivariance_error_sgchess(model, ...)   -> {"sigma_c": ..., "overall_mean": ...}
+                                        # SG_chess        -> sgcnn
 
-The GChess variant matches CLAUDE.md "Equivariance Error Metric"; the
-SGChess variant tests ONLY the single non-identity element sigma_c
-(the only non-identity element of the SG_chess subgroup), and is the
-right metric for ``GCNNChess(group=SGCHESS_GROUP)``.
+    equivariance_error_flipgroup(model, ...) -> {"sigma_h": ..., "overall_mean": ...}
+                                        # FlipGroup       -> fgcnn
 
-Both run in ``model.eval()`` + ``torch.no_grad()``. For Models 2 and 3
-each head is equivariant by construction under the corresponding
-group; expected error magnitude is ~float32-roundoff (a few times
-1e-6). For Model 1 (the baseline), the GChess metric quantifies the
-"implicit equivariance" learned from canonicalized data after training.
+All run in ``model.eval()`` + ``torch.no_grad()``. For the G-CNN models
+each head is equivariant by construction under the corresponding group,
+so the expected error is float32 round-off (~1e-7). For the baseline,
+the full G_chess metric quantifies how much equivariance it picked up
+implicitly from the canonicalised training data.
 """
 
 from __future__ import annotations
@@ -45,8 +42,7 @@ from symmetry.group import GChess
 
 
 def sample_chess_input(batch_size: int = 1, device: str = "cpu") -> torch.Tensor:
-    """Sample a (batch_size, 34, 8, 8) tensor matching the CLAUDE.md
-    sampling spec.
+    """Sample a random chess-like (batch_size, 34, 8, 8) input tensor.
 
     Produces values plausible for our 34-plane encoding:
       - Piece + repetition + castling planes: binary sparse 0/1.

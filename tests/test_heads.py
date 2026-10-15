@@ -1,7 +1,4 @@
-"""Phase 8: per-head equivariance/invariance with random body-output tensors.
-
-DOD (CLAUDE.md):
-> per-head equivariance with random body-output tensors
+"""Per-head equivariance/invariance with random body-output tensors.
 
 Each equivariant head is tested in isolation: we feed a random folded
 G-signal (B, F*|G|, 8, 8), apply group_action_g_signal(g, ...) as the

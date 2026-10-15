@@ -1,3 +1,10 @@
+# Canonical LCZero 1858-move policy index: the move ordering of the V6
+# training target `probabilities[1858]`.
+#
+# Vendored unmodified (apart from this header) from the Leela Chess Zero
+# training code:
+#   https://github.com/LeelaChessZero/lczero-training/blob/master/tf/policy_index.py
+
 policy_index = [
     "a1b1", "a1c1", "a1d1", "a1e1", "a1f1", "a1g1", "a1h1", "a1a2", "a1b2",
     "a1c2", "a1a3", "a1b3", "a1c3", "a1a4", "a1d4", "a1a5", "a1e5", "a1a6",

@@ -1,15 +1,11 @@
-"""Phase 8: end-to-end equivariance of GCNNChess.
-
-DOD (CLAUDE.md):
-> end-to-end equivariance_error(GCNNChess) < 1e-5 for all three
-> non-identity elements
+"""End-to-end equivariance of GCNNChess: equivariance_error < 1e-5 for
+all three non-identity elements of G_chess.
 
 Build a tiny GCNNChess (blocks=2, filters=32) and assert
 equivariance_error gives per-element errors well under 1e-5 across all
 three heads — i.e. the model is equivariant by construction at random
-init. Phase 11/12 will re-run the same metric AFTER training to verify
-equivariance is preserved by SGD (it should be, given GBatchNorm shares
-stats across the group fiber).
+init. (Training preserves this because every tied parameter is a single
+tensor and GBatchNorm shares its statistics across the group fiber.)
 
 Also covers the SGChess-equivariant variant (``GCNNChess(group=
 SGCHESS_GROUP)``): the same model architecture parameterized by the
@@ -106,12 +102,12 @@ def test_gcnn_chess_rejects_wrong_input_shape():
 
 
 # ---------------------------------------------------------------------------
-# DOD: end-to-end equivariance error < 1e-5 for each non-identity g
+# End-to-end equivariance error < 1e-5 for each non-identity g
 # ---------------------------------------------------------------------------
 
 
 def test_gcnn_chess_equivariance_error_below_threshold():
-    """The headline Phase-8 DOD test."""
+    """Headline check: the full model is G_chess-equivariant at init."""
     torch.manual_seed(0)
     model = GCNNChess(blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64)
     errors = equivariance_error(model, n_samples=8, device="cpu")
@@ -177,7 +173,7 @@ def test_sgcnn_chess_mlh_nonneg():
 
 
 def test_sgcnn_chess_equivariance_error_below_threshold():
-    """SGChess DOD: sigma_c equivariance error < 1e-5 at random init."""
+    """SGChess: sigma_c equivariance error < 1e-5 at random init."""
     torch.manual_seed(0)
     model = GCNNChess(
         blocks=2, filters=32, se_channels=8, mlh_channels=8, fc_size=64,

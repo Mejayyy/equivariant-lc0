@@ -1,6 +1,5 @@
-"""Training loop for `BaselineLCZero`, `GCNNChess` (GChess-equivariant),
-and `GCNNChess(group=SGCHESS_GROUP)` (SGChess-equivariant) on LCZero V6
-data.
+"""Training loop for `BaselineLCZero` and the group-equivariant
+`GCNNChess` variants on LCZero V6 data.
 
 Usage (CLI)::
 
@@ -21,6 +20,8 @@ Model variants:
 - ``sgcnn``    — ``GCNNChess(group=SGCHESS_GROUP)``: SG_chess =
   {e, sigma_c} subgroup equivariance only. |G| = 2; about half the
   body parameters of ``gcnn`` at matched (blocks, filters).
+- ``fgcnn``    — ``GCNNChess(group=FLIPGROUP_GROUP)``: FlipGroup =
+  {e, sigma_h} subgroup (file flip) equivariance only. |G| = 2.
 
 Pools all `.gz` games under `--data-root` (default `RAW_DATA_ROOT`) and
 splits them disjointly into train/val at the game level (see
@@ -602,8 +603,8 @@ def train(args: argparse.Namespace) -> None:
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Train BaselineLCZero, GChess-equivariant GCNNChess, or "
-            "SGChess-equivariant GCNNChess on LCZero V6 data."
+            "Train BaselineLCZero or a group-equivariant GCNNChess "
+            "(gcnn / sgcnn / fgcnn) on LCZero V6 data."
         )
     )
     p.add_argument("--model", choices=list(MODEL_NAMES), required=True)

@@ -1,7 +1,5 @@
-"""Phase 6: BaselineLCZero shape tests + BN-fold round-trip.
-
-DOD (CLAUDE.md):
-> shape tests, BN-fold round-trip (folded ~= unfolded output)
+"""BaselineLCZero: shape tests + BN-fold round-trip (folded ~= unfolded
+output).
 
 Tiny demo config (blocks=2, filters=32) keeps these tests fast.
 """
@@ -143,7 +141,7 @@ def _train_a_few_steps(model: BaselineLCZero, n_steps: int = 3) -> None:
 
 
 def test_baseline_fold_bn_round_trip():
-    """Phase 6 DOD: model.eval() output before fold == output after fold,
+    """model.eval() output before fold == output after fold,
     to within ~1e-5 (no approximation; just float-precision drift)."""
     torch.manual_seed(0)
     model = _demo_model()

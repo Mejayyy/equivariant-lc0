@@ -245,7 +245,7 @@ def build_flat_to_policy_index() -> Dict[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Orbit-based gather (used by EquivariantPolicyHead — Phase 8)
+# Orbit-based gather (used by EquivariantPolicyHead)
 # ---------------------------------------------------------------------------
 #
 # Why a different gather for the equivariant head:
@@ -261,8 +261,8 @@ def build_flat_to_policy_index() -> Dict[int, int]:
 #
 # Orbit-based gather:
 #   Group the 1858 moves into Klein-4 orbits (size 4 for non-promotions,
-#   size 2 for promotions since sigma_c is identity on promotions per
-#   Phase 3 design). Each orbit is assigned to a fixed 2x2 block of cells
+#   size 2 for promotions since sigma_c is the identity on promotions,
+#   see build_policy_permutation). Each orbit is assigned to a fixed 2x2 block of cells
 #   in some output channel:
 #       cell_E  = (c, r0,    f0   )  -- orbit representative
 #       cell_H  = (c, r0,    7-f0 )  -- file-flipped (sigma_h)

@@ -1,5 +1,5 @@
 """Render a small sample of V6 records as FEN strings + top-3 policy moves
-for HUMAN inspection.
+for manual inspection.
 
 Usage:
     python -m data.sanity_check
@@ -8,7 +8,7 @@ This script reads the first .gz file from raw_data/chunck_set_1/, takes the
 first N=20 records, and for each prints:
     - FEN, by inverting our canonicalization to absolute orientation and
       constructing a python-chess Board (chess960=True since this dataset
-      includes FRC games — see PROGRESS.md).
+      includes Fischer-random games).
     - Top-3 policy moves: probability, canonical UCI (per our
       models.policy_map ordering), absolute UCI (rank-flipped if
       black-to-move), and a legality flag against the rendered Board.
@@ -17,12 +17,11 @@ first N=20 records, and for each prints:
 At the end, an aggregate statistic is printed: fraction of top-1 / top-3
 moves judged legal across the printed sample. If the canonical-1858
 ordering of our policy_map matches V6's ordering, this fraction should be
-high (close to 100 %). If it's near zero, the orderings differ — see
-PROGRESS.md "Open questions" for the remediation plan.
+high (close to 100 %). If it's near zero, the orderings differ.
 
-This output is HUMAN-VERIFIED. The user must inspect the FENs and confirm
-they look like real, plausible chess positions, AND that the top-3 moves
-look reasonable for those positions.
+Run it before training: plane-extraction bugs are silent and would train a
+network on garbage. Inspect the FENs and confirm they look like real,
+plausible chess positions and that the top-3 moves are sensible.
 """
 
 import sys
@@ -236,14 +235,11 @@ def main() -> int:
         print(f"  any-of-top-3 legal: {legal_top3_any}/{rendered}  ({100*legal_top3_any/rendered:.0f}%)")
         print(f"  total top-3 legal:  {legal_top3_count}/{3*rendered}  ({100*legal_top3_count/(3*rendered):.0f}%)")
     print()
-    print("If most top-3 moves are flagged ILL, our models.policy_map ordering")
-    print("does NOT match V6's ordering — see PROGRESS.md 'Open questions'.")
+    print("If most top-3 moves are flagged ILL, the models.policy_map ordering")
+    print("does NOT match V6's ordering.")
     print()
-    print(">>> HUMAN ACTION REQUIRED <<<")
-    print("Inspect the FENs above. Confirm each looks like a real, plausible")
-    print("chess position, and that the top-3 moves are sensible (legal-and-")
-    print("reasonable-looking) for those positions. Reply 'confirmed' or")
-    print("describe any issues.")
+    print("Inspect the FENs above: each should look like a real, plausible")
+    print("chess position, with sensible (legal) top-3 moves.")
     return 0
 
 

@@ -7,7 +7,7 @@ network (no equivariance). Body + 3 heads share the model interface
     # value_wdl:     (B, 3)     softmax [W, D, L]
     # moves_left:    (B, 1)     ReLU output
 
-Body structure (CLAUDE.md "Architecture Quick-Reference"):
+Body structure:
 
     Input:  Conv2d(34, FILTERS, 3x3, padding=1, bias=True) -> BN -> ReLU
     Tower:  BLOCKS x ResBlock(FILTERS, SE_CHANNELS)

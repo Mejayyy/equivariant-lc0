@@ -1,6 +1,6 @@
-"""LCZero output heads — both baseline and Phase-8 equivariant variants.
+"""LCZero output heads — baseline and group-equivariant variants.
 
-Baseline (Model 1) heads (no equivariance, faithful LCZero re-implementation):
+Baseline heads (no equivariance, faithful LCZero re-implementation):
 - BaselinePolicyHead: Conv -> BN -> ReLU -> Conv(80 ch) -> BN -> ReLU
                      -> gather to (B, 1858) via the lc0 80-channel layout.
                      Returns RAW logits (no softmax).
@@ -15,7 +15,7 @@ preceding Conv and replaces the BN with `nn.Identity` — the network must
 be in `eval()` mode for the fold to be mathematically equivalent (eval
 uses the BN running stats; train would use batch stats which differ).
 
-Equivariant (Models 2/3) heads — Phase 8:
+Equivariant heads (used by GCNNChess for every group):
 - EquivariantPolicyHead: 2x [GConv -> GBN -> ReLU], sum over group dim,
                         orbit-based gather (built from
                         build_orbit_policy_gather) to (B, 1858).
@@ -162,7 +162,7 @@ class BaselineMovesLeftHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Equivariant (Phase 8) heads
+# Equivariant heads
 # ---------------------------------------------------------------------------
 
 
@@ -248,7 +248,7 @@ class EquivariantValueHead(nn.Module):
         cat(W, D, L), softmax -> (B, 3)
 
     The required output transform depends on which group elements are
-    present (per CLAUDE.md): SIGMA_C (color swap) maps [W, D, L] ->
+    present: SIGMA_C (color swap) maps [W, D, L] ->
     [L, D, W]; SIGMA_H (file flip) leaves [W, D, L] unchanged. So the
     head has TWO modes, chosen automatically from ``group``:
 

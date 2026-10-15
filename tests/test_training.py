@@ -1,12 +1,5 @@
-"""Phase 10: losses + trainer DOD checks.
-
-DOD (CLAUDE.md):
-> One training batch runs on each of the three models without NaN;
-> checkpoint save/load round-trip preserves outputs
-
-We currently have BaselineLCZero, GChess-equivariant GCNNChess, and
-SGChess-equivariant GCNNChess (Phase 9 SeparableGCNNChess is skipped),
-so the DOD is checked on those three.
+"""Losses + trainer checks: one training step runs on each model without
+NaN, and a checkpoint save/load round-trip preserves the outputs.
 """
 
 import math
@@ -130,7 +123,7 @@ def test_combined_loss_weights_apply():
 
 
 # ---------------------------------------------------------------------------
-# Trainer DOD: one training step doesn't NaN; checkpoint round-trip preserves output
+# Trainer: one training step doesn't NaN; checkpoint round-trip preserves output
 # ---------------------------------------------------------------------------
 
 
@@ -195,7 +188,7 @@ def test_train_one_step_grad_norm_without_clip():
 
 @pytest.mark.parametrize("model_name", ["baseline", "gcnn", "sgcnn"])
 def test_one_training_step_does_not_nan(model_name):
-    """Phase 10 DOD #1: a forward+backward+step on the model produces
+    """A forward+backward+step on the model produces
     finite gradients and finite parameters afterwards."""
     torch.manual_seed(0)
     model = build_model(
@@ -225,7 +218,7 @@ def test_one_training_step_does_not_nan(model_name):
 
 @pytest.mark.parametrize("model_name", ["baseline", "gcnn", "sgcnn"])
 def test_checkpoint_round_trip_preserves_outputs(tmp_path, model_name):
-    """Phase 10 DOD #2: save -> load reproduces the same forward output."""
+    """Save -> load reproduces the same forward output."""
     torch.manual_seed(0)
     model = build_model(model_name, blocks=2, filters=16, se_channels=4)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

@@ -230,7 +230,7 @@ def test_gconv_flipgroup_equivariance(sample):
 def test_gconv_flipgroup_kernel_uses_file_flip():
     """White-box: the FlipGroup GConv expands its 2 base kernels into the
     big (C_out*2, C_in*2, k, k) Conv2d weight with the sigma_h block
-    spatially FILE-flipped (the key point of the user's request 4)."""
+    spatially FILE-flipped."""
     torch.manual_seed(0)
     layer = GConv(in_channels=2, out_channels=2, kernel_size=3, padding=1, group=FLIPGROUP_GROUP)
     big = layer._build_kernel()  # (C_out*2, C_in*2, 3, 3)
@@ -535,7 +535,7 @@ def test_fgcnn_mlh_nonneg():
 
 
 def test_fgcnn_equivariance_error_below_threshold():
-    """The headline FGCNN DOD: sigma_h equivariance error < 1e-5."""
+    """Headline check: FGCNN sigma_h equivariance error < 1e-5."""
     torch.manual_seed(0)
     model = _make_fgcnn()
     errors = equivariance_error_flipgroup(model, n_samples=8, device="cpu")

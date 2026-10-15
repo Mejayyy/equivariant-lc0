@@ -7,7 +7,7 @@ Conventions:
 - sigma_c = rank flip + channel permutation + plane-30 negation
 - sigma_hc = sigma_h composed with sigma_c
 
-Input plane semantics (from CLAUDE.md):
+Input plane semantics (see data/extract_planes.py):
 - 0..5  our pieces (current),   6..11 opponent pieces (current)
 - 12 current repetition flag
 - 13..18 our pieces (1 ply ago), 19..24 opp pieces (1 ply ago)

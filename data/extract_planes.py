@@ -1,6 +1,6 @@
 """Convert V6Records into our 34-plane (34, 8, 8) input tensors.
 
-Channel layout (from CLAUDE.md):
+Channel layout:
      0..5   our pieces (P, N, B, R, Q, K), current ply
      6..11  opp pieces, current ply
     12      repetition flag, current ply
@@ -11,7 +11,7 @@ Channel layout (from CLAUDE.md):
     27      we can castle kingside     (we OO)
     28      opp can castle queenside
     29      opp can castle kingside
-    30      side-to-move (1 if black, else 0)
+    30      side-to-move (signed: +1 if black, -1 if white)
     31      rule50_count / 100.0
     32      all zeros
     33      all ones
@@ -27,7 +27,7 @@ Canonicalization (verified empirically against the actual records on disk):
     in V6 is always relative to side-to-move. We therefore copy planes
     directly without any swap-and-flip.
 
-    Plane 30 still records the original side-to-move (1 if black) so the
+    Plane 30 still records the original side-to-move (+1 if black) so the
     network can use that information; it does not require re-orienting the
     rest of the input.
 """
@@ -91,9 +91,7 @@ def v6_to_34_planes(record: V6Record) -> np.ndarray:
     #   white-to-move -> -1.0,  black-to-move -> +1.0
     # This makes sigma_c act on plane 30 as a pure SIGN FLIP
     # (x[30] -> -x[30]) — a linear operation, much cleaner to reason
-    # about than the prior `1 - x[30]` affine flip on a {0, 1}
-    # encoding. See PROGRESS.md for the discussion and CLAUDE.md's
-    # "Input Channel Specification" for the canonical layout.
+    # about than the `1 - x[30]` affine flip a {0, 1} encoding needs.
     out[30] = 1.0 if get_side_to_move(record) else -1.0
     out[31] = record.rule50_count / 100.0
     out[32] = 0.0
