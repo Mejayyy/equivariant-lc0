@@ -1,8 +1,13 @@
+# Data (download with scripts/download_data.py)
 raw_data/
 *.gz
+*.tar
+
+# Training outputs
 runs/
+*.pt
+
+# Python
 .venv/
 __pycache__/
-*.pt
 .pytest_cache/
-.claude/settings.local.json
