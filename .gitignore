@@ -6,6 +6,7 @@ raw_data/
 # Training outputs
 runs/
 *.pt
+!app/checkpoints/*.pt
 
 # Python
 .venv/

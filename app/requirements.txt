@@ -1,0 +1,5 @@
+# Dependencies of the visualisation app (CPU inference is enough).
+torch>=2.0.0
+numpy>=1.24
+python-chess>=1.999
+streamlit>=1.30
