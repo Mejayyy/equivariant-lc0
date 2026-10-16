@@ -6,6 +6,8 @@ policy / value / moves-left prediction, trained on LCZero self-play data.
 **Mihai-Radu Tataru** — MSc thesis project, University of Bucharest,
 Faculty of Mathematics and Computer Science (2026).
 
+[![Open the live demo in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://equivariant-lc0.streamlit.app)
+
 A chess board has geometric symmetries: mirror it left-to-right, or swap
 the colours and flip it, and the position means the same thing to the
 player who has to move. Leela Chess Zero's network has to learn these
@@ -95,6 +97,11 @@ matched **parameter counts** (fgcnn with 88 filters ≈ baseline with 128).
 
 ## Interactive demo
 
+**Try it live: [equivariant-lc0.streamlit.app](https://equivariant-lc0.streamlit.app)**. The deployed app
+runs the `main` branch, so it shows the four thesis models; run it locally
+on this branch to include fgcnn2. If it has been idle, Streamlit first asks
+you to wake it up, which takes about a minute.
+
 [`app/`](app) is a Streamlit app for seeing equivariance on a real board.
 Pick a position and a group element g, and it shows each model's output on
 the transformed board, f(g·x), next to the transformed output, g·f(x). For
@@ -109,6 +116,8 @@ Under the file mirror σ_h (above), gcnn, fgcnn and fgcnn2 match to float
 precision while the baseline and sgcnn do not; under the colour swap σ_c it is gcnn
 and sgcnn that match. A second mode shows each model's top moves,
 win/draw/loss and moves-left for any position you set up or play.
+
+To run it locally:
 
 ```bash
 pip install streamlit
