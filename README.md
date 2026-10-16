@@ -50,6 +50,16 @@ no self-play).
 
 ## The symmetry group
 
+<p align="center">
+  <img src="docs/figures/chess_symmetry.png" width="460" alt="Four chess boards: one position (top left) and its images under the colour swap (top right), the file mirror (bottom left) and both combined (bottom right). A blue arrow marks the same king move on every board, transformed along with the position.">
+</p>
+
+One position (top left) and its three images under the group. σ_h mirrors
+the files; σ_c flips the ranks and swaps the colours, so the other side
+is to move; σ_c ∘ σ_h does both. The blue arrow is the same king move on
+every board: an equivariant network must transform its predictions in
+exactly this way.
+
 G_chess = {e, σ_h, σ_c, σ_hc} ≅ Z/2 × Z/2, acting on the 34 input planes
 and on the three outputs:
 
