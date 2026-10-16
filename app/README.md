@@ -10,6 +10,7 @@ Equivariant models make the two coincide; the others visibly don't:
 | `gcnn` (G_chess) | MATCH | MATCH | MATCH |
 | `sgcnn` ({e, σ_c}) | – | MATCH | – |
 | `fgcnn` ({e, σ_h}) | MATCH | – | – |
+| `fgcnn2` ({e, σ_h}, AZ-layout policy head) | MATCH | – | – |
 | `baseline` | – | – | – |
 
 The baseline's residual shows how much equivariance it picked up from the
@@ -64,9 +65,10 @@ The initial state can be set from the URL, e.g. `?fen=<URL-encoded FEN>&g=sigma_
 
 ## Checkpoints
 
-`checkpoints/` holds small versions of the four models, trained for 20k
-steps. Only the weights are kept, stored in float16 (they are cast back to
-float32 when loaded):
+`checkpoints/` holds small versions of the four thesis models, trained for
+20k steps, and the fgcnn2 checkpoint from the run reported in the main
+README (42k steps). Only the weights are kept, stored in float16 (they are
+cast back to float32 when loaded):
 
 | File | Model | Blocks × filters | Params |
 |---|---|---|---:|
@@ -74,6 +76,7 @@ float32 when loaded):
 | `gcnn.pt` | gcnn | 5 × 43 | 2.07 M |
 | `sgcnn.pt` | sgcnn | 5 × 90 | 2.44 M |
 | `fgcnn.pt` | fgcnn | 5 × 90 | 2.44 M |
+| `fgcnn2.pt` | fgcnn2 | 10 × 88 | 3.85 M |
 
 Each model is rebuilt from its checkpoint's own config. The checkpoint
 folder in the sidebar (relative to the repository root) also accepts full
@@ -95,5 +98,5 @@ verify_equivariance.py  headless version of the equivariance checks
 viz/encoding.py         FEN -> 34 input planes; canonical-frame rendering
 viz/modelio.py          model loading, prediction, f(g·x) vs g·f(x) (no Streamlit)
 viz/render.py           board SVGs, WDL bars, badges
-checkpoints/            the four models
+checkpoints/            the five models
 ```

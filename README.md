@@ -102,11 +102,11 @@ an equivariant model the two coincide and the app shows MATCH; otherwise it
 shows MISMATCH and the residual.
 
 <p align="center">
-  <img src="docs/figures/app_equivariance.png" width="820" alt="The app under the file mirror σ_h on an Italian Game position: the original, canonical and mirrored boards on top; below, one board per model with its top-5 moves as arrows (blue = actual f(g·x), red = expected g·f(x)). gcnn and fgcnn show MATCH with residuals below 1e-7 and overlapping arrows; the baseline and sgcnn show MISMATCH with diverging arrows.">
+  <img src="docs/figures/app_equivariance.png" width="820" alt="The app under the file mirror σ_h on an Italian Game position: the original, canonical and mirrored boards on top; below, one board per model with its top-5 moves as arrows (blue = actual f(g·x), red = expected g·f(x)). gcnn, fgcnn and fgcnn2 show MATCH with residuals below 1e-7 and overlapping arrows; the baseline and sgcnn show MISMATCH with diverging arrows.">
 </p>
 
-Under the file mirror σ_h (above), gcnn and fgcnn match to float precision
-while the baseline and sgcnn do not; under the colour swap σ_c it is gcnn
+Under the file mirror σ_h (above), gcnn, fgcnn and fgcnn2 match to float
+precision while the baseline and sgcnn do not; under the colour swap σ_c it is gcnn
 and sgcnn that match. A second mode shows each model's top moves,
 win/draw/loss and moves-left for any position you set up or play.
 
@@ -115,8 +115,9 @@ pip install streamlit
 streamlit run app/app.py
 ```
 
-The app ships with small versions of all four models (5 residual blocks,
-2.1–2.4 M parameters, 20k training steps; 18 MB of float16 weights). See
+The app ships with small versions of the four thesis models (5 residual
+blocks, 2.1–2.4 M parameters, 20k training steps) and the fgcnn2
+checkpoint from the run below (42k steps): 26 MB of float16 weights. See
 [app/README.md](app/README.md) for the details.
 
 ## Results

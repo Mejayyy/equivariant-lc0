@@ -63,6 +63,7 @@ MODEL_CLAIMS: Dict[str, str] = {
     "gcnn": "σ_h, σ_c, σ_h∘σ_c",
     "sgcnn": "σ_c",
     "fgcnn": "σ_h",
+    "fgcnn2": "σ_h",
 }
 
 

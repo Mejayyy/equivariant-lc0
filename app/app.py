@@ -44,7 +44,7 @@ import metrics.equivariance as E
 from viz.modelio import MODEL_CLAIMS
 
 # Preferred display order; the actual MODEL_ORDER is the subset discovered.
-PREFERRED_ORDER = ["baseline", "gcnn", "sgcnn", "fgcnn"]
+PREFERRED_ORDER = ["baseline", "gcnn", "sgcnn", "fgcnn", "fgcnn2"]
 MODEL_ORDER = list(PREFERRED_ORDER)  # rebound after discovery
 START_FEN = chess.STARTING_FEN
 # Shown in the sidebar; relative paths are resolved from the repository root.
@@ -427,7 +427,7 @@ def _quantitative_panel():
             st.caption(
                 "Full GChess metric (relative-Frobenius error). A model reads ~1e-6–1e-7 "
                 "on the g's it's equivariant under and O(0.1–1) on the rest: gcnn matches "
-                "all, sgcnn only σ_c, **fgcnn only σ_h**, baseline none."
+                "all, sgcnn only σ_c, **fgcnn and fgcnn2 only σ_h**, baseline none."
             )
 
 

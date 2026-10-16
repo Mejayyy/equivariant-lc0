@@ -254,6 +254,7 @@ CLAIMS = {
     "gcnn": {"sigma_h", "sigma_c", "sigma_h_c"},
     "sgcnn": {"sigma_c"},
     "fgcnn": {"sigma_h"},
+    "fgcnn2": {"sigma_h"},
 }
 
 
