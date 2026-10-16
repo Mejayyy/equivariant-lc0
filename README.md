@@ -44,10 +44,14 @@ no self-play).
   encoder, FEN sanity check (60/60 top-3 target moves legal), game-level
   train/validation split, game-phase filters, sample counting from gzip
   trailers without decompression.
-- **388 tests:** bit-exact invertibility of every group action, per-layer,
+- **Interactive demo.** A Streamlit app that draws f(g·x) next to g·f(x)
+  on a real board for every model, so equivariance (and its absence) can
+  be seen move by move.
+- **425 tests:** bit-exact invertibility of every group action, per-layer,
   per-head and end-to-end equivariance (at initialisation and after
   optimiser steps), BN-folding round trips, real-data round trips, offline
-  tests of the data downloader.
+  tests of the data downloader, and the app's encoder, move indexing and
+  checkpoint symmetries.
 
 ## The symmetry group
 
@@ -88,6 +92,32 @@ counterpart (`LiftingConv`, `GConv`, `GBatchNorm`, `GSELayer`). A group
 convolution learns |G| kernels per weight slot, so at equal width the
 equivariant models are larger; the experiments therefore compare models at
 matched **parameter counts** (fgcnn with 88 filters ≈ baseline with 128).
+
+## Interactive demo
+
+[`app/`](app) is a Streamlit app for seeing equivariance on a real board.
+Pick a position and a group element g, and it shows each model's output on
+the transformed board, f(g·x), next to the transformed output, g·f(x). For
+an equivariant model the two coincide and the app shows MATCH; otherwise it
+shows MISMATCH and the residual.
+
+<p align="center">
+  <img src="docs/figures/app_equivariance.png" width="820" alt="The app under the file mirror σ_h on an Italian Game position: the original, canonical and mirrored boards on top; below, one board per model with its top-5 moves as arrows (blue = actual f(g·x), red = expected g·f(x)). gcnn and fgcnn show MATCH with residuals below 1e-7 and overlapping arrows; the baseline and sgcnn show MISMATCH with diverging arrows.">
+</p>
+
+Under the file mirror σ_h (above), gcnn and fgcnn match to float precision
+while the baseline and sgcnn do not; under the colour swap σ_c it is gcnn
+and sgcnn that match. A second mode shows each model's top moves,
+win/draw/loss and moves-left for any position you set up or play.
+
+```bash
+pip install streamlit
+streamlit run app/app.py
+```
+
+The app ships with small versions of all four models (5 residual blocks,
+2.1–2.4 M parameters, 20k training steps; 18 MB of float16 weights). See
+[app/README.md](app/README.md) for the details.
 
 ## Results
 
@@ -256,6 +286,13 @@ and loss-curve plots. `--turn-start N` and `--max-plies-left K` restrict
 training and validation to a game phase; `python -m training.plot <run>`
 redraws a run's curves and `scripts/compare_runs.py` compares runs.
 
+### Visualisation app
+
+```bash
+pip install streamlit
+streamlit run app/app.py    # f(g·x) vs g·f(x) on a real board; see app/README.md
+```
+
 ### Checking equivariance
 
 ```python
@@ -269,6 +306,7 @@ print(equivariance_error_flipgroup(model))   # {'sigma_h': ~1e-7, 'overall_mean'
 ## Repository layout
 
 ```
+app/           Streamlit app: f(g·x) vs g·f(x) on a real board, with small checkpoints
 data/          V6 parser, 34-plane encoder, targets, dataset, splits, sanity check
 models/        BaselineLCZero; G-CNN layers and GCNNChess; heads; 1858-move policy maps
 symmetry/      the chess symmetry groups and their actions on inputs and outputs
