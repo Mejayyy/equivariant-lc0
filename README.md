@@ -6,6 +6,8 @@ policy / value / moves-left prediction, trained on LCZero self-play data.
 **Mihai-Radu Tataru** — MSc thesis project, University of Bucharest,
 Faculty of Mathematics and Computer Science (2026).
 
+[![Open the live demo in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://equivariant-lc0.streamlit.app)
+
 A chess board has geometric symmetries: mirror it left-to-right, or swap
 the colours and flip it, and the position means the same thing to the
 player who has to move. Leela Chess Zero's network has to learn these
@@ -93,6 +95,9 @@ matched **parameter counts** (fgcnn with 88 filters ≈ baseline with 128).
 
 ## Interactive demo
 
+**Try it live: [equivariant-lc0.streamlit.app](https://equivariant-lc0.streamlit.app)** (if it has been
+idle, Streamlit first asks you to wake it up, which takes about a minute).
+
 [`app/`](app) is a Streamlit app for seeing equivariance on a real board.
 Pick a position and a group element g, and it shows each model's output on
 the transformed board, f(g·x), next to the transformed output, g·f(x). For
@@ -100,13 +105,17 @@ an equivariant model the two coincide and the app shows MATCH; otherwise it
 shows MISMATCH and the residual.
 
 <p align="center">
-  <img src="docs/figures/app_equivariance.png" width="820" alt="The app under the file mirror σ_h on an Italian Game position: the original, canonical and mirrored boards on top; below, one board per model with its top-5 moves as arrows (blue = actual f(g·x), red = expected g·f(x)). gcnn and fgcnn show MATCH with residuals below 1e-7 and overlapping arrows; the baseline and sgcnn show MISMATCH with diverging arrows.">
+  <a href="https://equivariant-lc0.streamlit.app/?fen=r1bqk1nr%2Fpppp1ppp%2F2n5%2F2b1p3%2F2B1P3%2F5N2%2FPPPP1PPP%2FRNBQK2R%20w%20KQkq%20-%204%204&amp;g=sigma_h">
+  <img src="docs/figures/app_equivariance.png" width="820" alt="The app under the file mirror σ_h on an Italian Game position: the original, canonical and mirrored boards on top; below, one board per model with its top-5 moves as arrows (blue = actual f(g·x), red = expected g·f(x)). gcnn and fgcnn show MATCH with residuals below 1e-7 and overlapping arrows; the baseline and sgcnn show MISMATCH with diverging arrows."></a>
 </p>
 
-Under the file mirror σ_h (above), gcnn and fgcnn match to float precision
-while the baseline and sgcnn do not; under the colour swap σ_c it is gcnn
+Under the file mirror σ_h (above; click the image to open this position in
+the live app), gcnn and fgcnn match to float precision while the baseline
+and sgcnn do not; under the colour swap σ_c it is gcnn
 and sgcnn that match. A second mode shows each model's top moves,
 win/draw/loss and moves-left for any position you set up or play.
+
+To run it locally:
 
 ```bash
 pip install streamlit
